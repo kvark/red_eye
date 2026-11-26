@@ -1,0 +1,38 @@
+[package]
+name = "red-eye"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "T-800 style augmented vision for Meta Quest 3, on Blade and Meganeura"
+license = "MIT"
+repository = "https://github.com/kvark/red_eye"
+publish = false
+
+[workspace]
+members = ["android-xr"]
+
+[dependencies]
+# Pinned to the exact blade-graphics revision meganeura depends on. Both
+# crates must resolve to the *same* blade-graphics so the
+# `Arc<blade_graphics::Context>` the renderer creates is the type
+# meganeura's `SessionConfig::gpu` accepts. Bump both pins together.
+blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
+meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "aba04dfbce47e2e459e6f60f8ab0a6e35bed1017", default-features = false }
+blade-macros = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+
+[dev-dependencies]
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+too_many_arguments = "allow"
+new_without_default = "allow"
+
+[[example]]
+name = "preview"
+path = "examples/preview.rs"

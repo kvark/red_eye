@@ -1,0 +1,17 @@
+/target
+
+# Weights and reference dumps: large, regenerable, and often under terms
+# that forbid redistribution in this repository.
+/ref
+*.safetensors
+*.onnx
+*.bin
+*.gguf
+
+# Compiled meganeura execution plans
+*.plan
+
+# Preview and capture output
+/out
+__pycache__/
+*.py[cod]

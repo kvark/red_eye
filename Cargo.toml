@@ -17,7 +17,7 @@ members = ["android-xr"]
 # `Arc<blade_graphics::Context>` the renderer creates is the type
 # meganeura's `SessionConfig::gpu` accepts. Bump both pins together.
 blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
-meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "aba04dfbce47e2e459e6f60f8ab0a6e35bed1017", default-features = false }
+meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "33855275ddd0a75e6f7059623223ba1ad524a5ea", default-features = false }
 blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
@@ -40,3 +40,7 @@ path = "examples/preview.rs"
 [[example]]
 name = "detect"
 path = "examples/detect.rs"
+
+[[example]]
+name = "onnx_check"
+path = "examples/onnx_check.rs"

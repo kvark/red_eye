@@ -25,13 +25,15 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked --target aarch64-linux-android -p red-eye-xr -- -D warnings
-      - name: Fetch YOLOX references
+      - name: Fetch models and references
         run: |
           pip install -r tools/requirements.txt
           tools/fetch_yolox.sh
+          tools/fetch_dfine.sh
       - run: cargo test --locked --release -- --include-ignored
       - run: cargo run --locked --release --example preview -- - out
       - run: cargo run --locked --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
+      - run: cargo run --locked --release --example detect -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg out/detect-dfine.png
       - name: YOLOX through the ONNX importer
         run: |
           cargo run --locked --release --example onnx_check -- ref/yolox_nano_onnx

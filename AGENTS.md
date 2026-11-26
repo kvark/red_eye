@@ -21,27 +21,29 @@ frame budget, milestones, upstream work).
 | `src/grade.rs` | Red grade (presets, LUT for `XR_FB_passthrough`) |
 | `src/render.rs`, `src/shaders/` | Blade passes; WGSL lives in `.wgsl` files |
 | `src/perception/` | `Detector` trait, COCO labels, NMS, tracking, the `Observation` the HUD reads |
-| `src/perception/yolox.rs` | YOLOX network (Meganeura graph), CPU reference preprocessing, decode |
-| `src/perception/preprocess.rs` | GPU preprocessing straight into the session's input buffer |
+| `src/perception/yolox.rs` | YOLOX network (hand-built Meganeura graph), decode |
+| `src/perception/dfine.rs` | D-FINE through Meganeura's ONNX importer, decode |
+| `src/perception/preprocess.rs` | Each model's `InputSpec`; GPU preprocessing into the session's input buffer, and its CPU reference |
 | `src/perception/worker.rs` | Detector thread: drops frames while busy, publishes observations |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `android-xr/` | OpenXR app (`cdylib`); `camera.rs` is the Camera2 passthrough camera |
 | `examples/preview.rs` | Headless render of the grade presets to PNG |
 | `examples/detect.rs` | Detector on an image, graded view with boxes to PNG |
 | `tests/gpu.rs` | GPU tests (`#[ignore]`, run on lavapipe or a real device) |
-| `tests/yolox.rs` | YOLOX against onnxruntime references (needs `ref/`) |
+| `tests/yolox.rs`, `tests/dfine.rs` | Detectors against onnxruntime references (need `ref/`) |
 | `examples/onnx_check.rs` | An ONNX export through Meganeura's importer against onnxruntime |
-| `tools/` | Python host tooling: weight conversion, references (`fetch_yolox.sh`, `onnx_reference.py`) |
+| `tools/` | Python host tooling: model fetch and preparation, references (`fetch_yolox.sh`, `fetch_dfine.sh`, `onnx_reference.py`) |
 
 ## Commands
 
 ```sh
 cargo test                                  # unit tests
-pip install -r tools/requirements.txt && tools/fetch_yolox.sh   # weights and references into ref/
-cargo test --release -- --include-ignored   # + GPU and YOLOX tests (lavapipe: apt install mesa-vulkan-drivers)
+pip install -r tools/requirements.txt && tools/fetch_yolox.sh && tools/fetch_dfine.sh   # models and references into ref/
+cargo test --release -- --include-ignored   # + GPU and detector tests (lavapipe: apt install mesa-vulkan-drivers)
 cargo run --release --example preview -- [image] [out-dir]
 cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
-python tools/onnx_reference.py model.onnx ref/candidate 1,3,480,640 [image]   # evaluate a candidate export
+cargo run --release --example detect -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg out/detect.png
+python tools/onnx_reference.py model.onnx ref/candidate 1,3,480,640 [image] [--simplify]   # evaluate a candidate export
 cargo run --release --example onnx_check -- ref/candidate
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
@@ -50,6 +52,7 @@ cargo clippy --target aarch64-linux-android -p red-eye-xr -- -D warnings
 cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 adb shell mkdir -p /data/local/tmp/red_eye && adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
+adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx   # preferred when present
 ```
 
 ## Rules

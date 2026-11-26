@@ -1,7 +1,7 @@
 //! The RedEye XR application.
 //!
 //! The left passthrough camera, graded red, drawn to both eyes at display
-//! rate, with YOLOX detections outlined over it. Detection runs on a worker
+//! rate, with detections outlined over it. Detection runs on a worker
 //! thread sharing the GPU context and never holds up a frame. The OpenXR
 //! plumbing is taken from DinoVision, where it was proven on a Quest 3.
 //!
@@ -16,11 +16,12 @@
 //! adb logcat -v time | grep -E "red_eye|RustStdoutStderr"
 //! ```
 //!
-//! Detection needs the converted weights on the device (see
-//! `tools/yolox_to_safetensors.py`); without them the app runs without it:
+//! Detection needs a model on the device; without one the app runs
+//! without it. D-FINE is preferred, YOLOX-Nano is the light fallback:
 //!
 //! ```text
 //! adb shell mkdir -p /data/local/tmp/red_eye
+//! adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx
 //! adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 //! ```
 
@@ -38,6 +39,7 @@ use openxr as xr;
 use red_eye::frame::Eye;
 use red_eye::grade::Grade;
 use red_eye::perception::Detector;
+use red_eye::perception::dfine::Dfine;
 use red_eye::perception::track::TrackerConfig;
 use red_eye::perception::worker::Worker;
 use red_eye::perception::yolox::{Config, Yolox};
@@ -47,9 +49,14 @@ use red_eye::source::{FrameSource, TestPattern};
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const CAPTURE_SIZE: (i32, i32) = (1280, 960);
 
-/// Converted YOLOX weights, pushed with `adb` rather than bundled while the
-/// model choice is still moving.
-const WEIGHTS_PATH: &str = "/data/local/tmp/red_eye/yolox_nano.safetensors";
+/// Detector models, pushed with `adb` rather than bundled while the model
+/// choice is still moving. D-FINE (`tools/fetch_dfine.sh`, prepared at
+/// [`DFINE_SIZE`]) is preferred when present: it is far more accurate, at
+/// about six times YOLOX-Nano's compute. YOLOX-Nano
+/// (`tools/fetch_yolox.sh`) is the light fallback.
+const DFINE_PATH: &str = "/data/local/tmp/red_eye/dfine_nano.onnx";
+const DFINE_SIZE: [u32; 2] = [640, 480];
+const YOLOX_PATH: &str = "/data/local/tmp/red_eye/yolox_nano.safetensors";
 
 /// Upper bound on detection rate: the 24 Hz target. Submitting faster would
 /// only take GPU time from the display.
@@ -67,19 +74,31 @@ const CONFIRM_HITS: u32 = 2;
 const BOX_THICKNESS: f32 = 3.0;
 
 fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
-    let weights = std::path::PathBuf::from(WEIGHTS_PATH);
-    if !weights.exists() {
-        warn!("no detector weights at {WEIGHTS_PATH}; running without detection");
+    let dfine = std::path::PathBuf::from(DFINE_PATH);
+    let yolox = std::path::PathBuf::from(YOLOX_PATH);
+    if !dfine.exists() && !yolox.exists() {
+        warn!("no detector at {DFINE_PATH} or {YOLOX_PATH}; running without detection");
         return None;
     }
     let context = Arc::clone(context);
     Some(Worker::spawn(
         move || {
-            let config = Config::nano().at_input(416, 320);
-            let mut model = Yolox::new(config, &weights, Some(context))?;
-            model.session().set_submission_chunks(SUBMISSION_CHUNKS);
-            info!("detector ready: YOLOX-Nano at 416x320");
-            Ok(Box::new(model) as Box<dyn Detector>)
+            let model: Box<dyn Detector> = if dfine.exists() {
+                let mut model = Dfine::new(&dfine, DFINE_SIZE, Some(context))?;
+                model.session().set_submission_chunks(SUBMISSION_CHUNKS);
+                info!(
+                    "detector ready: D-FINE-N at {}x{}",
+                    DFINE_SIZE[0], DFINE_SIZE[1]
+                );
+                Box::new(model)
+            } else {
+                let config = Config::nano().at_input(416, 320);
+                let mut model = Yolox::new(config, &yolox, Some(context))?;
+                model.session().set_submission_chunks(SUBMISSION_CHUNKS);
+                info!("detector ready: YOLOX-Nano at 416x320");
+                Box::new(model)
+            };
+            Ok(model)
         },
         TrackerConfig::default(),
     ))

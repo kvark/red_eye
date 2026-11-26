@@ -4,9 +4,12 @@ reference to check it against.
     python tools/onnx_reference.py model.onnx out_dir 1,3,640,640 [image] [--scale 255]
 
 Meganeura's importer needs static shapes. Exports from Transformers and
-similar keep the batch and image sizes symbolic and compute positional
-tables, masks and reshapes at run time, so the model is first given a fixed
-input shape and constant-folded with onnx-simplifier. The folded model is
+similar keep the batch and image sizes symbolic, so the input is given the
+fixed shape. The positional tables, masks and reshapes such exports compute
+from that shape are then constant subgraphs, which the importer folds
+itself. `--simplify` folds them here with onnx-simplifier instead, keeping
+any `Pad` separate from its convolution, since fusing them yields the
+asymmetric convolution padding the importer does not take. The model is
 written to `out_dir/model.onnx`, alongside:
 
 - `input.bin`: the input, f32, in the model's own layout. A deterministic
@@ -42,14 +45,26 @@ def main() -> None:
     parser.add_argument("image", nargs="?")
     parser.add_argument("--scale", type=float, default=255.0)
     parser.add_argument("--start-at", help="intermediate tensor to make the input")
+    parser.add_argument("--simplify", action="store_true", help="constant-fold with onnx-simplifier")
     args = parser.parse_args()
     shape = [int(x) for x in args.shape.split(",")]
 
     model = onnx.load(args.model)
     (graph_input,) = [i for i in model.graph.input if i.name not in {t.name for t in model.graph.initializer}]
-    folded, ok = onnxsim.simplify(model, overwrite_input_shapes={graph_input.name: shape})
-    if not ok:
-        raise SystemExit("onnx-simplifier could not validate the folded model")
+    if args.simplify:
+        folded, ok = onnxsim.simplify(
+            model,
+            overwrite_input_shapes={graph_input.name: shape},
+            skipped_optimizers=["fuse_pad_into_conv"],
+        )
+        if not ok:
+            raise SystemExit("onnx-simplifier could not validate the folded model")
+    else:
+        folded = model
+        dims = graph_input.type.tensor_type.shape
+        dims.ClearField("dim")
+        for value in shape:
+            dims.dim.add().dim_value = value
     os.makedirs(args.out_dir, exist_ok=True)
     model_path = os.path.join(args.out_dir, "model.onnx")
     onnx.save(folded, model_path)

@@ -38,13 +38,15 @@ fn shader_grade_matches_reference() {
 }
 
 /// The GPU preprocessing must produce exactly what the CPU reference does,
-/// on a frame with real chroma and a letterbox in both directions.
+/// on a frame with real chroma, for every input the detectors use:
+/// YOLOX's letterboxed BGR Focus layout in both letterbox directions, and
+/// D-FINE's stretched RGB in `0..=1`.
 #[test]
 #[ignore = "requires a working GPU context"]
-fn yolox_preprocess_matches_reference() {
+fn preprocess_matches_reference() {
     use blade_graphics as gpu;
-    use red_eye::perception::preprocess::GpuPreprocess;
-    use red_eye::perception::yolox::{self, Config};
+    use red_eye::perception::preprocess::{self, GpuPreprocess};
+    use red_eye::perception::{dfine, yolox};
 
     let context = red_eye::init_context(None).expect("no GPU");
     let (width, height) = (320u32, 240u32);
@@ -61,32 +63,37 @@ fn yolox_preprocess_matches_reference() {
         .collect();
     let frame = Frame::from_rgb8(width, height, &rgb, Eye::Left);
 
-    for config in [Config::nano().at_input(416, 320), Config::nano()] {
+    let specs = [
+        yolox::Config::nano().at_input(416, 320).input_spec(),
+        yolox::Config::nano().input_spec(),
+        dfine::input_spec([640, 480]),
+    ];
+    for spec in specs {
         let mut expected = Vec::new();
-        let cpu_letterbox = yolox::preprocess(&frame, &config, &mut expected);
+        let cpu_fit = preprocess::preprocess(&frame, &spec, &mut expected);
 
-        let bytes = (config.input_len() * 4) as u64;
         let output = context.create_buffer(gpu::BufferDesc {
             name: "preprocess-output",
-            size: bytes,
+            size: (spec.len() * 4) as u64,
             memory: gpu::Memory::Shared,
         });
         let mut pre = GpuPreprocess::new(&context);
-        let gpu_letterbox = pre.run(&context, &frame, &config, output.into());
+        let gpu_fit = pre.run(&context, &frame, &spec, output.into());
         pre.destroy(&context);
-        assert_eq!(gpu_letterbox, cpu_letterbox);
+        assert_eq!(gpu_fit, cpu_fit);
         let got: &[f32] =
-            unsafe { std::slice::from_raw_parts(output.data() as *const f32, config.input_len()) };
+            unsafe { std::slice::from_raw_parts(output.data() as *const f32, spec.len()) };
         let worst = got
             .iter()
             .zip(&expected)
             .map(|(g, e)| (g - e).abs())
             .fold(0.0f32, f32::max);
         context.destroy_buffer(output);
+        // A twentieth of one 0..=255 step, in the spec's own units.
+        let bound = 0.05 * spec.value_scale;
         assert!(
-            worst < 0.05,
-            "{:?}: GPU preprocessing deviates by {worst}",
-            config.input_size
+            worst < bound,
+            "{spec:?}: GPU preprocessing deviates by {worst}"
         );
     }
 }

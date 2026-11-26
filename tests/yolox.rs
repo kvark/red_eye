@@ -72,8 +72,8 @@ fn nano_finds_the_dog_and_the_bicycle() {
     let input = read_f32(Path::new("ref/yolox_nano_dog/input.bin"));
     let output = model.run(&input).to_vec();
     // The reference letterboxed a 768×576 picture into 416².
-    let letterbox = yolox::Letterbox::new([768, 576], config.input_size);
-    let mut dets = yolox::decode(&output, &config, &letterbox, 0.35);
+    let fit = red_eye::perception::preprocess::Fit::new([768, 576], &config.input_spec());
+    let mut dets = yolox::decode(&output, &config, &fit, 0.35);
     nms(&mut dets, 0.45);
     let names: Vec<_> = dets.iter().map(|d| d.label.name()).collect();
     println!("{names:?}");

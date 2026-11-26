@@ -40,6 +40,25 @@ fn main() {
         model.weights.len(),
         start.elapsed().as_secs_f32()
     );
+    // Where the graph's size comes from: the most frequent node kinds.
+    let mut kinds = std::collections::HashMap::<String, usize>::new();
+    for node in model.graph.nodes() {
+        let name = format!("{:?}", node.op);
+        let kind = name
+            .split([' ', '{', '('])
+            .next()
+            .unwrap_or("?")
+            .to_string();
+        *kinds.entry(kind).or_default() += 1;
+    }
+    let mut kinds: Vec<_> = kinds.into_iter().collect();
+    kinds.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    let top: Vec<_> = kinds
+        .iter()
+        .take(8)
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect();
+    println!("most frequent nodes: {}", top.join(", "));
 
     let start = Instant::now();
     let (mut session, _) = meganeura::build(

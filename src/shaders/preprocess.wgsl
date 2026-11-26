@@ -1,16 +1,18 @@
-// Camera frame (I420) to YOLOX input: letterbox with bilinear resampling,
-// BT.601 YUV to BGR in 0..255, padding 114, written in the Focus
-// space-to-depth layout the network's first convolution reads.
-// Mirrors `yolox::preprocess` in src/perception/yolox.rs; tests/gpu.rs
-// holds the two to agreement.
+// Camera frame (I420) to a detector's input: fit (letterbox or stretch)
+// with bilinear resampling, BT.601 YUV to RGB or BGR, scale the 0..255
+// values, and write plain CHW or YOLOX's Focus space-to-depth layout.
+// Mirrors `preprocess::preprocess` in src/perception/preprocess.rs;
+// tests/gpu.rs holds the two to agreement.
 
 struct Params {
     // frame width, frame height, resized width, resized height
     frame: vec4<u32>,
     // input width, input height, input width / 2, input height / 2
     input: vec4<u32>,
-    // frame width / resized width, frame height / resized height, pad, unused
+    // frame width / resized width, frame height / resized height, pad, value scale
     scale: vec4<f32>,
+    // BGR order, Focus layout, unused, unused
+    flags: vec4<u32>,
 }
 var<uniform> params: Params;
 
@@ -41,9 +43,12 @@ fn sample(base: u32, w: u32, h: u32, x_in: f32, y_in: f32) -> f32 {
     return top + (bottom - top) * fy;
 }
 
-fn focus_index(x: u32, y: u32, c: u32) -> u32 {
-    let phase = (x % 2u) * 2u + (y % 2u);
-    return ((phase * 3u + c) * params.input.w + y / 2u) * params.input.z + x / 2u;
+fn input_index(x: u32, y: u32, c: u32) -> u32 {
+    if params.flags.y != 0u {
+        let phase = (x % 2u) * 2u + (y % 2u);
+        return ((phase * 3u + c) * params.input.w + y / 2u) * params.input.z + x / 2u;
+    }
+    return (c * params.input.y + y) * params.input.x + x;
 }
 
 @compute @workgroup_size(8, 8)
@@ -53,7 +58,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if x >= params.input.x || y >= params.input.y {
         return;
     }
-    var bgr = vec3<f32>(params.scale.z);
+    var rgb = vec3<f32>(params.scale.z);
     if x < params.frame.z && y < params.frame.w {
         let fw = params.frame.x;
         let fh = params.frame.y;
@@ -66,13 +71,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let cy = (src_y - 0.5) * 0.5;
         let u = sample(fw * fh, cw, ch, cx, cy) - 128.0;
         let v = sample(fw * fh + cw * ch, cw, ch, cx, cy) - 128.0;
-        bgr = clamp(
-            vec3<f32>(l + 1.772 * u, l - 0.344136 * u - 0.714136 * v, l + 1.402 * v),
+        rgb = clamp(
+            vec3<f32>(l + 1.402 * v, l - 0.344136 * u - 0.714136 * v, l + 1.772 * u),
             vec3<f32>(0.0),
             vec3<f32>(255.0),
-        );
+        ) * params.scale.w;
+        if params.flags.x != 0u {
+            rgb = rgb.zyx;
+        }
     }
-    output[focus_index(x, y, 0u)] = bgr.x;
-    output[focus_index(x, y, 1u)] = bgr.y;
-    output[focus_index(x, y, 2u)] = bgr.z;
+    output[input_index(x, y, 0u)] = rgb.x;
+    output[input_index(x, y, 1u)] = rgb.y;
+    output[input_index(x, y, 2u)] = rgb.z;
 }

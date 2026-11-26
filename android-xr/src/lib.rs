@@ -1,8 +1,9 @@
 //! The RedEye XR application.
 //!
-//! Milestone 1: the left passthrough camera, graded red, drawn to both eyes
-//! at display rate. No HUD and no inference yet. The OpenXR plumbing is
-//! taken from DinoVision, where it was proven on a Quest 3.
+//! The left passthrough camera, graded red, drawn to both eyes at display
+//! rate, with YOLOX detections outlined over it. Detection runs on a worker
+//! thread sharing the GPU context and never holds up a frame. The OpenXR
+//! plumbing is taken from DinoVision, where it was proven on a Quest 3.
 //!
 //! This is the *self-rendered* world view. The target architecture lets the
 //! compositor draw passthrough with the grade as its colour map and keeps
@@ -13,6 +14,14 @@
 //! cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 //! adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 //! adb logcat -v time | grep -E "red_eye|RustStdoutStderr"
+//! ```
+//!
+//! Detection needs the converted weights on the device (see
+//! `tools/yolox_to_safetensors.py`); without them the app runs without it:
+//!
+//! ```text
+//! adb shell mkdir -p /data/local/tmp/red_eye
+//! adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 //! ```
 
 #![cfg(target_os = "android")]
@@ -28,11 +37,53 @@ use log::{info, warn};
 use openxr as xr;
 use red_eye::frame::Eye;
 use red_eye::grade::Grade;
-use red_eye::render::{GradePass, Placement};
+use red_eye::perception::Detector;
+use red_eye::perception::track::TrackerConfig;
+use red_eye::perception::worker::Worker;
+use red_eye::perception::yolox::{Config, Yolox};
+use red_eye::render::{BoxInstance, BoxPass, GradePass, Placement};
 use red_eye::source::{FrameSource, TestPattern};
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const CAPTURE_SIZE: (i32, i32) = (1280, 960);
+
+/// Converted YOLOX weights, pushed with `adb` rather than bundled while the
+/// model choice is still moving.
+const WEIGHTS_PATH: &str = "/data/local/tmp/red_eye/yolox_nano.safetensors";
+
+/// Upper bound on detection rate: the 24 Hz target. Submitting faster would
+/// only take GPU time from the display.
+const DETECT_INTERVAL: Duration = Duration::from_millis(41);
+
+/// Meganeura splits the network into this many queue submissions so the
+/// renderer's submissions can interleave. Two was best in DinoVision's
+/// co-tenancy sweep; re-measure for YOLOX.
+const SUBMISSION_CHUNKS: usize = 2;
+
+/// Frames a track must be seen in before it is outlined.
+const CONFIRM_HITS: u32 = 2;
+
+/// Outline thickness in eye-buffer pixels.
+const BOX_THICKNESS: f32 = 3.0;
+
+fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
+    let weights = std::path::PathBuf::from(WEIGHTS_PATH);
+    if !weights.exists() {
+        warn!("no detector weights at {WEIGHTS_PATH}; running without detection");
+        return None;
+    }
+    let context = Arc::clone(context);
+    Some(Worker::spawn(
+        move || {
+            let config = Config::nano().at_input(416, 320);
+            let mut model = Yolox::new(config, &weights, Some(context))?;
+            model.session().set_submission_chunks(SUBMISSION_CHUNKS);
+            info!("detector ready: YOLOX-Nano at 416x320");
+            Ok(Box::new(model) as Box<dyn Detector>)
+        },
+        TrackerConfig::default(),
+    ))
+}
 
 /// Place the camera image in an eye whose frustum is `[left, right, up,
 /// down]` radians: span the frustum symmetrically about the eye's axis.
@@ -70,6 +121,12 @@ struct App {
     grade_pass: GradePass,
     grade: Grade,
     linear_target: bool,
+    box_pass: BoxPass,
+    detector: Option<Worker>,
+    last_detect: Instant,
+    shown_generation: u64,
+    detections: u64,
+    detect_latency_ms: f32,
     start: Instant,
     /// The previous submission. The grade pass reuses one staging buffer,
     /// so its upload must not be overwritten while still in flight.
@@ -93,6 +150,12 @@ impl App {
                 [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32],
             ),
             linear_target: is_srgb(format),
+            box_pass: BoxPass::new(context, format),
+            detector: spawn_detector(context),
+            last_detect: Instant::now(),
+            shown_generation: 0,
+            detections: 0,
+            detect_latency_ms: 0.0,
             surface,
             source,
             camera_active: true,
@@ -154,6 +217,30 @@ impl App {
         encoder.init_texture(frame.texture());
         if let Some(camera_frame) = self.source.next_frame() {
             self.grade_pass.upload(context, encoder, camera_frame);
+            // Offer the frame for detection; a busy worker drops it.
+            if let Some(worker) = &self.detector
+                && self.last_detect.elapsed() >= DETECT_INTERVAL
+                && worker.submit(camera_frame)
+            {
+                self.last_detect = Instant::now();
+            }
+        }
+        // The previous submission has completed (waited on above), so the
+        // box buffer is free to rewrite.
+        if let Some(worker) = &self.detector
+            && worker.generation() != self.shown_generation
+            && let Some(observation) = worker.latest()
+        {
+            self.shown_generation = worker.generation();
+            self.detections += 1;
+            self.detect_latency_ms = observation.latency_ms;
+            let boxes: Vec<_> = observation
+                .tracks
+                .iter()
+                .filter(|t| t.is_confirmed(CONFIRM_HITS))
+                .map(|t| BoxInstance::new(&t.rect, red_eye::hud::outline_color(t.label.category())))
+                .collect();
+            self.box_pass.set_boxes(context, &boxes);
         }
 
         let time = self.start.elapsed().as_secs_f32();
@@ -176,12 +263,15 @@ impl App {
                     depth_stencil: None,
                 },
             );
-            self.grade_pass.draw(
+            let placement = eye_placement(fov);
+            self.grade_pass
+                .draw(&mut pass, &self.grade, placement, time, self.linear_target);
+            let extent = self.surface.extent();
+            self.box_pass.draw(
                 &mut pass,
-                &self.grade,
-                eye_placement(fov),
-                time,
-                self.linear_target,
+                placement,
+                [extent.width, extent.height],
+                BOX_THICKNESS,
             );
         }
 
@@ -191,17 +281,26 @@ impl App {
 
         if self.last_report.elapsed() >= Duration::from_secs(5) {
             let secs = self.last_report.elapsed().as_secs_f64();
-            info!("render {:.1} Hz", self.frames as f64 / secs);
+            info!(
+                "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms",
+                self.frames as f64 / secs,
+                self.detections as f64 / secs,
+                self.detect_latency_ms,
+            );
             self.frames = 0;
+            self.detections = 0;
             self.last_report = Instant::now();
         }
     }
 
     fn destroy(mut self, context: &gpu::Context) {
+        // Join the worker first: it holds the context and may be mid-submit.
+        drop(self.detector.take());
         if let Some(sync) = self.last_submit.take() {
             let _ = context.wait_for(&sync, !0);
         }
         self.grade_pass.destroy(context);
+        self.box_pass.destroy(context);
         context.destroy_xr_surface(&mut self.surface);
     }
 }

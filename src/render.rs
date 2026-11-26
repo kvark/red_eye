@@ -217,11 +217,141 @@ impl GradePass {
     }
 }
 
-/// Grade one frame offscreen at its own resolution and read back RGBA8.
+/// One box outline: `rect` is `[min x, min y, max x, max y]` in normalised
+/// image coordinates (y down), as perception reports them.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BoxInstance {
+    pub rect: [f32; 4],
+    pub color: [f32; 4],
+}
+
+impl BoxInstance {
+    pub fn new(rect: &crate::perception::Rect, color: [f32; 4]) -> Self {
+        Self {
+            rect: [rect.min[0], rect.min[1], rect.max[0], rect.max[1]],
+            color,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct BoxParams {
+    placement: [f32; 4],
+    viewport: [f32; 4],
+}
+
+#[derive(blade_macros::ShaderData)]
+struct BoxData {
+    params: BoxParams,
+    boxes: gpu::BufferPiece,
+}
+
+/// Draws box outlines in camera-image coordinates, with the same
+/// [`Placement`] as [`GradePass`] so they sit on what the camera saw. A
+/// debugging view until the HUD draws targets properly.
+pub struct BoxPass {
+    pipeline: gpu::RenderPipeline,
+    buffer: gpu::Buffer,
+    count: u32,
+}
+
+impl BoxPass {
+    /// Boxes beyond this are not drawn.
+    pub const CAPACITY: usize = 128;
+
+    pub fn new(context: &gpu::Context, color_format: gpu::TextureFormat) -> Self {
+        let shader = context.create_shader(gpu::ShaderDesc {
+            source: include_str!("shaders/boxes.wgsl"),
+            naga_module: None,
+        });
+        let layout = <BoxData as gpu::ShaderData>::layout();
+        let pipeline = context.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "boxes",
+            data_layouts: &[&layout],
+            vertex: shader.at("vs_main"),
+            vertex_fetches: &[],
+            primitive: gpu::PrimitiveState::default(),
+            depth_stencil: None,
+            fragment: Some(shader.at("fs_main")),
+            color_targets: &[gpu::ColorTargetState {
+                format: color_format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+        let buffer = context.create_buffer(gpu::BufferDesc {
+            name: "boxes",
+            size: (Self::CAPACITY * std::mem::size_of::<BoxInstance>()) as u64,
+            memory: gpu::Memory::Shared,
+        });
+        Self {
+            pipeline,
+            buffer,
+            count: 0,
+        }
+    }
+
+    /// Replace the boxes. The buffer is shared with in-flight draws, so call
+    /// only once the previous frame's submission has completed.
+    pub fn set_boxes(&mut self, context: &gpu::Context, boxes: &[BoxInstance]) {
+        let boxes = &boxes[..boxes.len().min(Self::CAPACITY)];
+        let bytes: &[u8] = bytemuck::cast_slice(boxes);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.buffer.data(), bytes.len());
+        }
+        context.sync_buffer(
+            self.buffer.into(),
+            bytes.len().max(1) as u64,
+            gpu::BufferTarget::Data,
+        );
+        self.count = boxes.len() as u32;
+    }
+
+    pub fn draw(
+        &self,
+        pass: &mut gpu::RenderCommandEncoder,
+        placement: Placement,
+        target_size: [u32; 2],
+        thickness: f32,
+    ) {
+        if self.count == 0 {
+            return;
+        }
+        let mut pc = pass.with(&self.pipeline);
+        pc.bind(
+            0,
+            &BoxData {
+                params: BoxParams {
+                    placement: placement.transform,
+                    viewport: [target_size[0] as f32, target_size[1] as f32, thickness, 0.0],
+                },
+                boxes: self.buffer.into(),
+            },
+        );
+        pc.draw(0, 6, 0, self.count * 4);
+    }
+
+    pub fn destroy(mut self, context: &gpu::Context) {
+        context.destroy_render_pipeline(&mut self.pipeline);
+        context.destroy_buffer(self.buffer);
+    }
+}
+
+/// Grade one frame offscreen at its own resolution, draw `boxes` over it,
+/// and read back RGBA8.
 ///
 /// Headless and synchronous: for previews, tests and dataset tooling, never
 /// for the display path.
-pub fn render_graded(context: &gpu::Context, frame: &Frame, grade: &Grade, time: f32) -> Vec<u8> {
+pub fn render_graded(
+    context: &gpu::Context,
+    frame: &Frame,
+    grade: &Grade,
+    time: f32,
+    boxes: &[BoxInstance],
+) -> Vec<u8> {
     let size = gpu::Extent {
         width: frame.width,
         height: frame.height,
@@ -256,6 +386,8 @@ pub fn render_graded(context: &gpu::Context, frame: &Frame, grade: &Grade, time:
     });
 
     let mut pass = GradePass::new(context, format, [frame.width, frame.height]);
+    let mut box_pass = BoxPass::new(context, format);
+    box_pass.set_boxes(context, boxes);
     let mut encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
         name: "offscreen",
         buffer_count: 1,
@@ -277,6 +409,14 @@ pub fn render_graded(context: &gpu::Context, frame: &Frame, grade: &Grade, time:
             },
         );
         pass.draw(&mut rp, grade, Placement::FULLSCREEN, time, false);
+        // Lines scale with the image so they read the same at any size.
+        let thickness = (size.width.max(size.height) as f32 / 400.0).max(1.0);
+        box_pass.draw(
+            &mut rp,
+            Placement::FULLSCREEN,
+            [size.width, size.height],
+            thickness,
+        );
     }
     {
         let mut transfer = encoder.transfer("readback");
@@ -294,6 +434,7 @@ pub fn render_graded(context: &gpu::Context, frame: &Frame, grade: &Grade, time:
     }
 
     pass.destroy(context);
+    box_pass.destroy(context);
     context.destroy_command_encoder(&mut encoder);
     context.destroy_buffer(readback);
     context.destroy_texture_view(view);

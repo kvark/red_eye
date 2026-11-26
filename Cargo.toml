@@ -36,3 +36,7 @@ new_without_default = "allow"
 [[example]]
 name = "preview"
 path = "examples/preview.rs"
+
+[[example]]
+name = "detect"
+path = "examples/detect.rs"

@@ -235,6 +235,33 @@ for face boxes; PP-OCR mobile (Apache) for text reading; Silero VAD and
 Moonshine-tiny (MIT) for the response menu; SmolVLM2-256M (Apache, already
 in Meganeura) for scene descriptions.
 
+## Detector implementation
+
+Where the pieces live, and how each was verified (all on lavapipe, in CI):
+
+| Piece | Where | Verified by |
+|---|---|---|
+| Weight conversion | `tools/yolox_to_safetensors.py`, `tools/fetch_yolox.sh` (pinned SHA-256) | the network refuses a checkpoint whose conv shapes differ |
+| Network | `perception/yolox.rs`: CSPDarknet, PAFPN and decoupled head, built in the reference's forward order | `tests/yolox.rs`: worst relative error against onnxruntime 1.2e-5 (Nano, random), 9.5e-5 (Nano, photo), 9.8e-6 (Tiny) |
+| Preprocessing | `shaders/yolox_preprocess.wgsl` into `Session::input_buffer`; CPU reference `yolox::preprocess` | `tests/gpu.rs`: GPU equals CPU on a colourful frame, both letterbox directions |
+| Decode, NMS | `yolox::decode`, `perception::nms` (best class per anchor, class-aware NMS, as the reference) | unit tests; the YOLOX demo photo yields DOG 0.85, BICYCLE 0.80, CAR 0.80 |
+| Worker | `perception/worker.rs`: detector built on its thread, frames dropped while busy, tracker, `Observation` | unit tests with a fake detector |
+| Display | `render::BoxPass`, the grade pass's placement; XR app outlines confirmed tracks | `tests/gpu.rs`; on-device pending |
+
+Notes:
+
+- The Focus slicing is folded into preprocessing, so the graph input is
+  `[12, H/2, W/2]` and needs no strided slice. The weights are
+  resolution-independent; the app runs 416×320 to match the cameras' 4:3.
+- The network needed nothing new from Meganeura: `conv2d`, `conv2d_dw`,
+  `max_pool_2d`, `upsample_2x`, two-input `concat` (also used as a flat
+  append to join the three output levels), `silu` and `sigmoid`.
+- The XR app loads `/data/local/tmp/red_eye/yolox_nano.safetensors`, caps
+  submissions at 24 Hz and uses two submission chunks, as DinoVision found
+  best. Both are guesses until measured on the Quest.
+- On lavapipe a Nano frame takes about 1 s; that is the CPU emulating a GPU
+  and says nothing about the Quest.
+
 ## Frame budget at 24 Hz
 
 41.7 ms per perception frame, of which roughly 20 ms of GPU time is
@@ -245,7 +272,7 @@ replaces it.
 | Slot | Work | Cadence | Est. GPU ms |
 |---|---|---|---|
 | Preprocess | YUV→RGB, resize, Focus slicing (compute shader) | every frame | ~1 |
-| Detection | YOLOX-Nano @416×320 (Tiny: ~25 before tuning) | every frame | ~4 |
+| Detection | YOLOX-Nano @416×320, 0.83 GFLOPs (Tiny: ~25 ms before tuning) | every frame | ~4 |
 | Decode, NMS, tracking | CPU | every frame | 0 (CPU <1 ms) |
 | Depth | Depth API | every frame | 0 |
 
@@ -278,9 +305,10 @@ one optional extension on a staggered cadence.
 - **M1**: on device, the left camera graded through `GradePass` to both eyes.
   Plus the calibration benchmark and Quest 3 device facts (Meganeura items
   1–2).
-- **M2**: the detector. YOLOX-Nano as a Meganeura graph with official weights,
-  checked against onnxruntime on the host. GPU preprocessing, CPU decode and
-  NMS, tracking. Debug boxes with class names on the graded view.
+- **M2 (host-verified, not yet on a device)**: the detector. YOLOX as a
+  Meganeura graph with the official weights, matching onnxruntime; GPU
+  preprocessing; CPU decode, NMS and tracking on a worker thread; boxes over
+  the graded view in the XR app. Details under "Detector implementation".
 - **M3**: the Blade XR work (layers, passthrough with the colour map,
   environment depth, past poses); world-space targets; HUD text (SDF atlas,
   typewriter, scroll); target lock, object ID, data scroll, boot, damage.

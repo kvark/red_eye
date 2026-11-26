@@ -15,7 +15,10 @@
 //! frame: `x` right and `y` down, both in `0..=1`.
 
 pub mod labels;
+pub mod preprocess;
 pub mod track;
+pub mod worker;
+pub mod yolox;
 
 pub use labels::{Category, Label};
 
@@ -94,10 +97,56 @@ pub trait Detector {
     fn detect(&mut self, frame: &crate::frame::Frame) -> Vec<Detection>;
 }
 
+/// Class-aware non-maximum suppression: keep the best-scoring box of each
+/// overlapping same-label cluster, as YOLOX's reference postprocess does.
+/// Leaves `detections` sorted by descending score.
+pub fn nms(detections: &mut Vec<Detection>, iou_threshold: f32) {
+    detections.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut kept: Vec<Detection> = Vec::with_capacity(detections.len());
+    for det in detections.drain(..) {
+        let suppressed = kept
+            .iter()
+            .any(|k| k.label == det.label && k.rect.iou(&det.rect) > iou_threshold);
+        if !suppressed {
+            kept.push(det);
+        }
+    }
+    *detections = kept;
+}
+
 /// Everything perception knows at one instant.
 #[derive(Clone, Debug, Default)]
 pub struct Observation {
     /// Capture time of the frame this was computed from, nanoseconds.
     pub timestamp_ns: i64,
+    /// Every live track, confirmed or not; the HUD decides what to show.
     pub tracks: Vec<track::Track>,
+    /// Wall time from submission to result, for the data-scroll telemetry.
+    pub latency_ms: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn det(x: f32, label: u16, score: f32) -> Detection {
+        Detection {
+            rect: Rect::new(x, 0.0, x + 0.2, 0.5),
+            label: Label(label),
+            score,
+        }
+    }
+
+    #[test]
+    fn nms_keeps_the_best_of_each_cluster_per_label() {
+        let mut dets = vec![
+            det(0.10, 0, 0.6),
+            det(0.11, 0, 0.9),
+            det(0.12, 2, 0.5), // same place, different label: kept
+            det(0.60, 0, 0.4), // elsewhere: kept
+        ];
+        nms(&mut dets, 0.45);
+        let kept: Vec<_> = dets.iter().map(|d| (d.label.0, d.score)).collect();
+        assert_eq!(kept, [(0, 0.9), (2, 0.5), (0, 0.4)]);
+    }
 }

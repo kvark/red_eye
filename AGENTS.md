@@ -20,24 +20,33 @@ frame budget, milestones, upstream work).
 | `src/source.rs` | `FrameSource`; test pattern and still image |
 | `src/grade.rs` | Red grade (presets, LUT for `XR_FB_passthrough`) |
 | `src/render.rs`, `src/shaders/` | Blade passes; WGSL lives in `.wgsl` files |
-| `src/perception/` | Detector trait, COCO labels, tracking, the `Observation` the HUD reads |
+| `src/perception/` | `Detector` trait, COCO labels, NMS, tracking, the `Observation` the HUD reads |
+| `src/perception/yolox.rs` | YOLOX network (Meganeura graph), CPU reference preprocessing, decode |
+| `src/perception/preprocess.rs` | GPU preprocessing straight into the session's input buffer |
+| `src/perception/worker.rs` | Detector thread: drops frames while busy, publishes observations |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `android-xr/` | OpenXR app (`cdylib`); `camera.rs` is the Camera2 passthrough camera |
 | `examples/preview.rs` | Headless render of the grade presets to PNG |
+| `examples/detect.rs` | Detector on an image, graded view with boxes to PNG |
 | `tests/gpu.rs` | GPU tests (`#[ignore]`, run on lavapipe or a real device) |
+| `tests/yolox.rs` | YOLOX against onnxruntime references (needs `ref/`) |
+| `tools/` | Python host tooling: weight conversion, references (`fetch_yolox.sh`) |
 
 ## Commands
 
 ```sh
 cargo test                                  # unit tests
-cargo test -- --include-ignored             # + GPU tests (lavapipe: apt install mesa-vulkan-drivers)
+pip install -r tools/requirements.txt && tools/fetch_yolox.sh   # weights and references into ref/
+cargo test --release -- --include-ignored   # + GPU and YOLOX tests (lavapipe: apt install mesa-vulkan-drivers)
 cargo run --release --example preview -- [image] [out-dir]
+cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --target aarch64-linux-android -p red-eye-xr -- -D warnings
 # Device (needs Android SDK 34, NDK r27, cargo-apk, and Blade cloned at ../blade):
 cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
+adb shell mkdir -p /data/local/tmp/red_eye && adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 ```
 
 ## Rules
@@ -48,6 +57,10 @@ adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 - **Meganeura and Blade are ours.** When an op, kernel or XR feature is
   missing, add it upstream with that repo's tests instead of working around it
   here, and record the work in `docs/technology.md`.
+- **YOLOX weights bind by position.** The official exports are anonymous,
+  so `conv.NNN` is the NNN-th convolution in forward order. Any change to
+  `yolox::Network` must keep the reference's order; `tests/yolox.rs` catches
+  a slip.
 - **Pins move together.** `blade-graphics` must be the exact revision
   Meganeura pins, so the `Arc<Context>` types match. `openxr` must be the
   version Blade uses. Bump them in one commit.

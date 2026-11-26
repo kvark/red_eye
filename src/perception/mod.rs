@@ -14,6 +14,7 @@
 //! All coordinates are normalised image coordinates of the source camera
 //! frame: `x` right and `y` down, both in `0..=1`.
 
+pub mod dfine;
 pub mod labels;
 pub mod preprocess;
 pub mod track;

@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use meganeura::{Graph, NodeId};
 
-use super::preprocess::GpuPreprocess;
+use super::preprocess::{Fit, GpuPreprocess, InputSpec};
 use super::{Detection, Label, Rect};
 use crate::frame::Frame;
 
@@ -43,8 +43,6 @@ use crate::frame::Frame;
 pub const STRIDES: [u32; 3] = [8, 16, 32];
 /// Name of the graph input.
 pub const INPUT: &str = "images";
-/// Value YOLOX pads letterboxed images with.
-const PAD_VALUE: f32 = 114.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -91,6 +89,20 @@ impl Config {
         Self {
             input_size: [width, height],
             ..self
+        }
+    }
+
+    /// The input the network was trained on: the frame letterboxed
+    /// top-left and padded with 114, BGR in `0..=255`, in the Focus layout
+    /// (see the module docs).
+    pub fn input_spec(&self) -> InputSpec {
+        InputSpec {
+            size: self.input_size,
+            letterbox: true,
+            pad: 114.0,
+            bgr: true,
+            value_scale: 1.0,
+            focus: true,
         }
     }
 
@@ -484,6 +496,12 @@ impl Yolox {
         );
         network.load_weights(&mut session, &weights)?;
         let config = network.config;
+        log::info!(
+            "YOLOX: {}x{} input, {} dispatches",
+            config.input_size[0],
+            config.input_size[1],
+            session.plan().dispatches.len()
+        );
         let preprocess = Some(GpuPreprocess::new(&session.context()));
         Ok(Self {
             output: vec![0.0; config.output_len()],
@@ -499,7 +517,8 @@ impl Yolox {
         &mut self.session
     }
 
-    /// Run on an already preprocessed input (see [`preprocess`]) and return
+    /// Run on an already preprocessed input (see
+    /// [`super::preprocess::preprocess`]) and return
     /// the raw output in the layout described in the module docs.
     pub fn run(&mut self, input: &[f32]) -> &[f32] {
         self.session.set_input(INPUT, input);
@@ -510,7 +529,7 @@ impl Yolox {
 
     /// Preprocess `frame` on the GPU straight into the session's input and
     /// run the network. Returns the raw output and how the frame was fitted.
-    pub fn run_frame(&mut self, frame: &Frame) -> (&[f32], Letterbox) {
+    pub fn run_frame(&mut self, frame: &Frame) -> (&[f32], Fit) {
         let context = self.session.context();
         let input = self
             .session
@@ -518,15 +537,15 @@ impl Yolox {
             .expect("the graph has an input named INPUT");
         // The previous step was waited on by `wait_read_output`, so the
         // input buffer is free to overwrite.
-        let letterbox = self.preprocess.as_mut().expect("alive until drop").run(
+        let fit = self.preprocess.as_mut().expect("alive until drop").run(
             &context,
             frame,
-            &self.config,
+            &self.config.input_spec(),
             input,
         );
         self.session.step();
         self.session.wait_read_output(0, &mut self.output);
-        (&self.output, letterbox)
+        (&self.output, fit)
     }
 }
 
@@ -541,108 +560,20 @@ impl Drop for Yolox {
 impl super::Detector for Yolox {
     fn detect(&mut self, frame: &Frame) -> Vec<Detection> {
         let (score, nms) = (self.score_threshold, self.nms_threshold);
-        let letterbox = self.run_frame(frame).1;
-        let mut detections = decode(&self.output, &self.config, &letterbox, score);
+        let fit = self.run_frame(frame).1;
+        let mut detections = decode(&self.output, &self.config, &fit, score);
         super::nms(&mut detections, nms);
         detections
     }
 }
 
-/// How a frame was fitted into the network input: scaled by `scale` and
-/// placed at the top-left corner, the rest padded.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Letterbox {
-    pub scale: f32,
-    pub frame_size: [u32; 2],
-}
-
-impl Letterbox {
-    pub fn new(frame_size: [u32; 2], input_size: [u32; 2]) -> Self {
-        let scale = (input_size[0] as f32 / frame_size[0] as f32)
-            .min(input_size[1] as f32 / frame_size[1] as f32);
-        Self { scale, frame_size }
-    }
-
-    /// The scaled frame's extent inside the input, as the reference
-    /// truncates it.
-    pub fn resized(&self) -> [u32; 2] {
-        self.frame_size.map(|s| (s as f32 * self.scale) as u32)
-    }
-}
-
-/// Focus-rearranged index of input pixel `(x, y)`, colour `c` (B, G, R).
-fn focus_index(input_size: [u32; 2], x: u32, y: u32, c: u32) -> usize {
-    let (half_w, half_h) = (input_size[0] / 2, input_size[1] / 2);
-    let phase = (x % 2) * 2 + (y % 2);
-    (((phase * 3 + c) * half_h + y / 2) * half_w + x / 2) as usize
-}
-
-/// CPU reference preprocessing: letterbox the frame into the network input
-/// with bilinear resampling (as `cv2.INTER_LINEAR` does), convert BT.601
-/// YUV to BGR in `0..=255`, and write the Focus layout. The GPU path in
-/// `shaders/yolox_preprocess.wgsl` must match this.
-pub fn preprocess(frame: &Frame, config: &Config, out: &mut Vec<f32>) -> Letterbox {
-    let input = config.input_size;
-    let letterbox = Letterbox::new([frame.width, frame.height], input);
-    let [rw, rh] = letterbox.resized();
-    out.clear();
-    out.resize(config.input_len(), PAD_VALUE);
-
-    let (fw, fh) = (frame.width as usize, frame.height as usize);
-    let luma = frame.luma();
-    let (u_plane, v_plane) = frame.chroma();
-    let (cw, ch) = (fw / 2, fh / 2);
-    // Bilinear sample of a plane at continuous pixel coordinates.
-    let sample = |plane: &[u8], w: usize, h: usize, x: f32, y: f32| -> f32 {
-        let x = x.clamp(0.0, (w - 1) as f32);
-        let y = y.clamp(0.0, (h - 1) as f32);
-        let (x0, y0) = (x as usize, y as usize);
-        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-        let at = |xx: usize, yy: usize| plane[yy * w + xx] as f32;
-        let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * fx;
-        let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * fx;
-        top + (bottom - top) * fy
-    };
-    let (sx, sy) = (fw as f32 / rw as f32, fh as f32 / rh as f32);
-    for y in 0..rh {
-        let src_y = (y as f32 + 0.5) * sy - 0.5;
-        for x in 0..rw {
-            let src_x = (x as f32 + 0.5) * sx - 0.5;
-            let l = sample(luma, fw, fh, src_x, src_y);
-            // Chroma sits at half resolution, sited between luma pairs.
-            let (cx, cy) = ((src_x - 0.5) * 0.5, (src_y - 0.5) * 0.5);
-            let u = sample(u_plane, cw, ch, cx, cy) - 128.0;
-            let v = sample(v_plane, cw, ch, cx, cy) - 128.0;
-            let bgr = [
-                l + 1.772 * u,
-                l - 0.344_136 * u - 0.714_136 * v,
-                l + 1.402 * v,
-            ];
-            for (c, value) in bgr.into_iter().enumerate() {
-                out[focus_index(input, x, y, c as u32)] = value.clamp(0.0, 255.0);
-            }
-        }
-    }
-    letterbox
-}
-
 /// Turn the raw output into detections in normalised frame coordinates,
 /// keeping each anchor's best class if `objectness * class score` clears
 /// `threshold`. Not yet non-maximum suppressed.
-pub fn decode(
-    output: &[f32],
-    config: &Config,
-    letterbox: &Letterbox,
-    threshold: f32,
-) -> Vec<Detection> {
+pub fn decode(output: &[f32], config: &Config, fit: &Fit, threshold: f32) -> Vec<Detection> {
     let per_anchor = config.outputs_per_anchor();
     let mut detections = Vec::new();
     let mut offset = 0;
-    let to_frame = [
-        1.0 / (letterbox.scale * letterbox.frame_size[0] as f32),
-        1.0 / (letterbox.scale * letterbox.frame_size[1] as f32),
-    ];
     for ([gw, gh], stride) in config.grids().into_iter().zip(STRIDES) {
         let cells = (gw * gh) as usize;
         let block = &output[offset..offset + cells * per_anchor];
@@ -665,11 +596,13 @@ pub fn decode(
             let cy = (channel(1, cell) + (cell / gw as usize) as f32) * stride;
             let w = channel(2, cell).exp() * stride;
             let h = channel(3, cell).exp() * stride;
+            let [x0, y0] = fit.to_frame([cx - 0.5 * w, cy - 0.5 * h]);
+            let [x1, y1] = fit.to_frame([cx + 0.5 * w, cy + 0.5 * h]);
             let rect = Rect::new(
-                ((cx - 0.5 * w) * to_frame[0]).clamp(0.0, 1.0),
-                ((cy - 0.5 * h) * to_frame[1]).clamp(0.0, 1.0),
-                ((cx + 0.5 * w) * to_frame[0]).clamp(0.0, 1.0),
-                ((cy + 0.5 * h) * to_frame[1]).clamp(0.0, 1.0),
+                x0.clamp(0.0, 1.0),
+                y0.clamp(0.0, 1.0),
+                x1.clamp(0.0, 1.0),
+                y1.clamp(0.0, 1.0),
             );
             detections.push(Detection {
                 rect,
@@ -733,42 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn focus_phases_follow_the_reference_order() {
-        let size = [4, 4];
-        // top-left, bottom-left, top-right, bottom-right; B, G, R in each.
-        assert_eq!(focus_index(size, 0, 0, 0), 0);
-        assert_eq!(focus_index(size, 0, 1, 0), 3 * 4);
-        assert_eq!(focus_index(size, 1, 0, 0), 6 * 4);
-        assert_eq!(focus_index(size, 1, 1, 2), 11 * 4);
-        // (3, 2) is top-right phase, G: plane 7, row 1, column 1.
-        assert_eq!(focus_index(size, 3, 2, 1), 7 * 4 + 2 + 1);
-    }
-
-    #[test]
-    fn letterbox_fits_the_camera_frame() {
-        let lb = Letterbox::new([1280, 960], [416, 320]);
-        assert_eq!(lb.resized(), [416, 312]);
-        let square = Letterbox::new([1280, 960], [416, 416]);
-        assert_eq!(square.resized(), [416, 312]);
-    }
-
-    #[test]
-    fn preprocess_pads_and_converts_grey() {
-        let config = Config::nano().at_input(64, 64);
-        let mut frame = Frame::new(64, 32, crate::frame::Eye::Left);
-        frame.luma_mut().fill(200);
-        let mut input = Vec::new();
-        let lb = preprocess(&frame, &config, &mut input);
-        assert_eq!(lb.resized(), [64, 32]);
-        // Inside the image: grey stays grey in every channel.
-        for c in 0..3 {
-            assert!((input[focus_index([64, 64], 10, 10, c)] - 200.0).abs() < 1e-3);
-        }
-        // Below it: padding.
-        assert_eq!(input[focus_index([64, 64], 10, 40, 0)], PAD_VALUE);
-    }
-
-    #[test]
     fn decode_places_a_box_in_frame_coordinates() {
         let config = Config::nano().at_input(64, 64);
         let mut output = vec![0.0; config.output_len()];
@@ -786,8 +683,8 @@ mod tests {
         set(&mut output, 5, 0.8);
         assert_eq!(output.len() % per_anchor, 0);
         // A 128×128 frame was scaled by 0.5 into the 64×64 input.
-        let lb = Letterbox::new([128, 128], [64, 64]);
-        let dets = decode(&output, &config, &lb, 0.5);
+        let fit = Fit::new([128, 128], &config.input_spec());
+        let dets = decode(&output, &config, &fit, 0.5);
         assert_eq!(dets.len(), 1);
         let d = dets[0];
         assert_eq!(d.label, Label::PERSON);

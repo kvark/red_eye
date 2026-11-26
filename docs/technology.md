@@ -103,23 +103,34 @@ the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
 5. **Example**: an `examples-android` passthrough sample, so this is tested
    in Blade itself and not only through RedEye.
 
-### Meganeura (rev `a964c5b`, 0.3)
+### Meganeura (rev `b25f763`, 0.3)
 
 Meganeura is our crate. What follows is its state today. The gaps are
 work items for us, not constraints on RedEye; they are collected under
 [Meganeura work for RedEye](#meganeura-work-for-redeye). DinoVision proved
 the stack end to end and was not optimised for the Quest.
 
-- **The ONNX importer covers CNN detectors, not yet DETRs.** Since
-  `3385527` it imports grouped and depthwise Conv, ConvTranspose, Resize,
-  TopK (k ≤ 64) and GridSample, and since `a964c5b` strided `Slice`.
-  Shapes must be static: exports with symbolic shapes become importable
-  after `tools/onnx_reference.py` fixes the input shape and constant-folds
-  them. Checked with `examples/onnx_check.rs` against onnxruntime:
-  - **YOLOX-Nano and YOLOX-Tiny** (official exports, whole, Focus
-    included) import and match to 2.1e-5 and 1.9e-5. CI runs both.
-  - **D-FINE-N** (`onnx-community/dfine-nano-coco-ONNX`, Apache-2.0) folds
-    cleanly at 640×640 and 640×480, then stops at the ops in item 3 below.
+- **The ONNX importer runs both our detectors.** Grouped and depthwise
+  Conv, ConvTranspose, Resize, TopK and GridSample (`3385527`), strided
+  `Slice` (`a964c5b`), and Pad, Clip, Tile, GatherElements, TopK up to
+  k = 512 and import-time folding of constant subgraphs (`33d66fb`,
+  `b25f763`). Shapes must be static, so `tools/onnx_reference.py` fixes the
+  input shape. Checked with `examples/onnx_check.rs` and the tests against
+  onnxruntime:
+  - **YOLOX-Nano and YOLOX-Tiny** (official exports, whole) match to
+    2.1e-5 and 1.9e-5.
+  - **D-FINE-N** (`onnx-community/dfine-nano-coco-ONNX`, Apache-2.0) matches
+    to 5.5e-5 (logits) and 9.2e-6 (boxes) at 640×480, and 2.0e-5 and
+    3.4e-6 at 640×640. Its graph is 6053 nodes and **1967 dispatches**,
+    against 370 for the imported YOLOX-Nano export (254 for our hand-built
+    graph). Most come from TopK, lowered as one pass per
+    selected element (see item 3 below).
+  - This export still goes through onnx-simplifier (`--simplify`). It
+    builds D-FINE's box-weighting table with `Pow(x, 1/15)` from two scalar
+    initializers, and the importer folds constants but not through
+    initializers, which it treats as parameters. The simplifier's
+    Pad-into-Conv fusion is turned off, because the asymmetric convolution
+    padding it produces (`[0, 0, 1, 1]`) does not import.
 - **The hand-built graph API covers what we need for CNNs and ViTs**:
   `conv2d`, `conv2d_dw` (depthwise), `max_pool_2d`, `upsample_2x`
   (nearest), `concat`/`split`, `group_norm`/`layer_norm`, attention, `clamp`
@@ -166,23 +177,22 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
 2. **Calibration benchmark on device**: a native (non-XR) APK as in
    DinoVision's `android/`, timing conv, depthwise, matmul and attention
    archetypes and whole models, with thermal state recorded.
-3. **Remaining ops for D-FINE-N**, from its folded export (the rest of
-   its 30-odd op types already import, including the six bilinear
-   `GridSample`s):
-   - `TopK` with k = 300 over 2000 anchors (1500 at 640×480), for query
-     selection; the importer caps k at 64.
-   - `GatherElements` on axis 1 (×2): picking the top-300 rows of
-     `[1, 2000, 4]` boxes and `[1, 2000, 128]` features by those indices.
-   - `Tile` (×2): only broadcasting `[1, 300, 1]` indices along the last
-     axis, so lowering it to `Expand` suffices here.
-   - `Clip` (×9): constant bounds, some one-sided (`min` only).
-   - `Pad` (×1): constant zero, one pixel on the bottom and right of the
-     stem.
+3. **D-FINE's cost and import path** (all its ops now import):
+   - **A real TopK kernel.** D-FINE selects 300 of 1500 anchors at
+     640×480 (2000 at 640²); the current lowering takes one max-and-mask
+     pass per element, so about 1,500 of its 1967 dispatches. A
+     single-dispatch select (bitonic or radix) would bring D-FINE near
+     YOLOX's dispatch count. This decides whether D-FINE is affordable on
+     the Quest.
+   - Fold through scalar initializers that feed only constant arithmetic
+     (D-FINE's `up` and `reg_scale` into `Pow`), so the raw export imports
+     without onnx-simplifier.
+   - Asymmetric convolution padding, which simplifiers and TensorFlow
+     exports produce.
 4. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
-   Where and comparisons, non-last-axis Softmax. (Strided `Slice` landed
-   in `a964c5b`.) Candidate models are evaluated
-   from their exports with `tools/onnx_reference.py` and
-   `examples/onnx_check.rs` before anything is hand-written.
+   non-last-axis Softmax. Candidate models are evaluated from their
+   exports with `tools/onnx_reference.py` and `examples/onnx_check.rs`
+   before anything is hand-written.
 5. **Adreno kernels**:
    - int8 convolution and matmul on packed `dot4I8Packed`. It exists today
      for LLM GEMV only; extending it to conv is likely the largest win for
@@ -213,8 +223,25 @@ the platform's depth and these mechanics work:
 M1–M2 and M11–M13 need no model at all. Only M8 (speech), M9 (OCR), M10
 (face mesh) and M14 need anything else, and they are optional extensions.
 
-**Detector: YOLOX** (Megvii, Apache-2.0), trained on COCO's 80 classes
-([`perception::labels`](../src/perception/labels.rs)). It is a plain CNN:
+**Detectors.** Both are trained on COCO's 80 classes
+([`perception::labels`](../src/perception/labels.rs)) and run through the
+same GPU preprocessing, worker and tracker. The app prefers D-FINE when its
+model is on the device and falls back to YOLOX-Nano.
+
+| | Licence | Size | COCO AP | Compute at the app's input | Path into Meganeura |
+|---|---|---|---|---|---|
+| **D-FINE-N** | Apache-2.0 | 3.8M | 42.8 | 640×480: ~5.3 GFLOPs, 1967 dispatches | ONNX import of the Transformers export |
+| **YOLOX-Nano** | Apache-2.0 | 0.91M | 25.8 | 416×320: 0.83 GFLOPs, 254 dispatches | hand-built graph, official weights |
+
+On the YOLOX demo photo, D-FINE finds BICYCLE 0.95, DOG 0.94 and TRUCK
+0.66, with tighter boxes. YOLOX-Nano finds DOG 0.85, BICYCLE 0.80 and CAR
+0.80, and calls the pickup a car. D-FINE takes the frame stretched (not
+letterboxed) to its input, RGB in `0..=1`, and returns 300 queries of
+sigmoid class logits and normalised `cx, cy, w, h` boxes, with no NMS. Its
+cost on the Quest is unknown: about six times YOLOX-Nano's arithmetic, plus
+a dispatch count Meganeura item 3 should cut.
+
+**YOLOX** (Megvii, Apache-2.0) It is a plain CNN:
 conv, depthwise conv, SiLU, max-pool, nearest upsample and concat, all of
 which Meganeura's graph builder already has. The Focus slicing goes into
 our preprocessing shader. Its output is a dense grid of (box, objectness,
@@ -229,17 +256,11 @@ graph's output can be checked against onnxruntime on the host.
 
 Upgrades if quality demands them, in order of effort:
 
-1. **Fine-tune YOLOX** in Meganeura on egocentric, low-light, near-greyscale
-   passthrough captures, possibly with fewer classes. The Quest cameras are
-   not the clean photos COCO was shot with (DinoVision saw the same domain
-   gap).
-2. **D-FINE-N** (Apache, 42.8 AP at 7 GFLOPs@640) through the ONNX
-   importer, once the ops in Meganeura item 3 land. On the YOLOX demo
-   photo at 640×480 it is far more confident than YOLOX-Nano (onnxruntime):
-   BICYCLE 0.95, DOG 0.94, CAR 0.67, against 0.80–0.85. It takes the image
-   resized (not letterboxed) to its input, RGB in `0..=1`, and returns 300
-   queries of sigmoid class logits and normalised `cx, cy, w, h` boxes: no
-   NMS needed.
+1. **Fine-tune** on egocentric, low-light, near-greyscale passthrough
+   captures, possibly with fewer classes. The Quest cameras are not the
+   clean photos COCO was shot with (DinoVision saw the same domain gap).
+2. **Larger D-FINE** (S: 48.5 AP) if the Quest has room; the same import
+   path loads it.
 3. **More names** than COCO's 80 via Objects365-trained weights (365
    classes), where an Apache release exists for the chosen architecture.
 
@@ -261,8 +282,9 @@ Where the pieces live, and how each was verified (all on lavapipe, in CI):
 |---|---|---|
 | Weight conversion | `tools/yolox_to_safetensors.py`, `tools/fetch_yolox.sh` (pinned SHA-256) | the network refuses a checkpoint whose conv shapes differ |
 | Network | `perception/yolox.rs`: CSPDarknet, PAFPN and decoupled head, built in the reference's forward order | `tests/yolox.rs`: worst relative error against onnxruntime 1.2e-5 (Nano, random), 9.5e-5 (Nano, photo), 9.8e-6 (Tiny) |
-| Preprocessing | `shaders/yolox_preprocess.wgsl` into `Session::input_buffer`; CPU reference `yolox::preprocess` | `tests/gpu.rs`: GPU equals CPU on a colourful frame, both letterbox directions |
-| Decode, NMS | `yolox::decode`, `perception::nms` (best class per anchor, class-aware NMS, as the reference) | unit tests; the YOLOX demo photo yields DOG 0.85, BICYCLE 0.80, CAR 0.80 |
+| Preprocessing | `shaders/preprocess.wgsl` into `Session::input_buffer`, driven by each model's `InputSpec`; CPU reference `preprocess::preprocess` | `tests/gpu.rs`: GPU equals CPU on a colourful frame for both YOLOX letterboxes and D-FINE's stretch |
+| YOLOX decode, NMS | `yolox::decode`, `perception::nms` (best class per anchor, class-aware NMS, as the reference) | unit tests; the YOLOX demo photo yields DOG 0.85, BICYCLE 0.80, CAR 0.80 |
+| D-FINE | `perception/dfine.rs`: ONNX import, outputs identified by size, best class per query, no NMS; `tools/fetch_dfine.sh` prepares the export | `tests/dfine.rs`: 5.5e-5 against onnxruntime; BICYCLE 0.95, DOG 0.94, TRUCK 0.66 end to end |
 | Worker | `perception/worker.rs`: detector built on its thread, frames dropped while busy, tracker, `Observation` | unit tests with a fake detector |
 | Display | `render::BoxPass`, the grade pass's placement; XR app outlines confirmed tracks | `tests/gpu.rs`; on-device pending |
 
@@ -272,18 +294,20 @@ Notes:
   `[12, H/2, W/2]` and needs no strided slice. The weights are
   resolution-independent; the app runs 416×320 to match the cameras' 4:3.
 - The hand-built graph and the ONNX import of the whole official export
-  agree, so either can serve. The hand-built one stays for now: its input
-  is the Focus layout our preprocessing writes, so it skips the eight
-  strided slices (11 fewer dispatches), and it writes the flat output the
-  decoder reads, with no Python step to prepare the model.
+  agree, so either can serve. The hand-built one stays: it compiles to 254
+  dispatches against the import's 370. Its input is the Focus layout our
+  preprocessing writes, so it skips the eight strided slices, and it writes
+  the flat output the decoder reads, with no reshapes and transposes and no
+  Python step to prepare the model.
 - The network needed nothing new from Meganeura: `conv2d`, `conv2d_dw`,
   `max_pool_2d`, `upsample_2x`, two-input `concat` (also used as a flat
   append to join the three output levels), `silu` and `sigmoid`.
-- The XR app loads `/data/local/tmp/red_eye/yolox_nano.safetensors`, caps
-  submissions at 24 Hz and uses two submission chunks, as DinoVision found
-  best. Both are guesses until measured on the Quest.
-- On lavapipe a Nano frame takes about 1 s; that is the CPU emulating a GPU
-  and says nothing about the Quest.
+- The XR app loads `/data/local/tmp/red_eye/dfine_nano.onnx` if present,
+  else `yolox_nano.safetensors`. It caps submissions at 24 Hz and uses two
+  submission chunks, as DinoVision found best. Both are guesses until
+  measured on the Quest.
+- On lavapipe a frame takes about 1 s with YOLOX-Nano and 4 s with D-FINE-N;
+  that is the CPU emulating a GPU and says nothing about the Quest.
 
 ## Frame budget at 24 Hz
 
@@ -295,12 +319,15 @@ replaces it.
 | Slot | Work | Cadence | Est. GPU ms |
 |---|---|---|---|
 | Preprocess | YUV→RGB, resize, Focus slicing (compute shader) | every frame | ~1 |
-| Detection | YOLOX-Nano @416×320, 0.83 GFLOPs (Tiny: ~25 ms before tuning) | every frame | ~4 |
+| Detection | YOLOX-Nano @416×320, 0.83 GFLOPs | every frame | ~4 |
+| or detection | D-FINE-N @640×480, ~5.3 GFLOPs, 1967 dispatches | every frame if it fits, else every 2nd | ~26 + dispatch overhead, before tuning |
 | Decode, NMS, tracking | CPU | every frame | 0 (CPU <1 ms) |
 | Depth | Depth API | every frame | 0 |
 
-That leaves headroom for YOLOX-Tiny once the Adreno kernels improve, or for
-one optional extension on a staggered cadence.
+YOLOX-Nano leaves headroom for one optional extension on a staggered
+cadence. D-FINE-N does not fit the budget at these estimates until the
+TopK kernel and Adreno tuning land; the device measurement decides between
+them.
 
 ## Risks and open questions
 
@@ -328,14 +355,15 @@ one optional extension on a staggered cadence.
 - **M1**: on device, the left camera graded through `GradePass` to both eyes.
   Plus the calibration benchmark and Quest 3 device facts (Meganeura items
   1–2).
-- **M2 (host-verified, not yet on a device)**: the detector. YOLOX as a
-  Meganeura graph with the official weights, matching onnxruntime; GPU
-  preprocessing; CPU decode, NMS and tracking on a worker thread; boxes over
-  the graded view in the XR app. Details under "Detector implementation".
+- **M2 (host-verified, not yet on a device)**: the detectors. YOLOX as a
+  Meganeura graph with the official weights, and D-FINE-N through the ONNX
+  importer, both matching onnxruntime; GPU preprocessing; decode and
+  tracking on a worker thread; boxes over the graded view in the XR app.
+  Details under "Detector implementation".
 - **M3**: the Blade XR work (layers, passthrough with the colour map,
   environment depth, past poses); world-space targets; HUD text (SDF atlas,
   typewriter, scroll); target lock, object ID, data scroll, boot, damage.
 - **M4**: the rest of the core mechanics: acquisition inset, size
   assessment, threat assessment, compass. Adreno kernel work driven by the
-  benchmark; a YOLOX fine-tune on passthrough captures if needed.
-- **Later**: optional extensions (speech, OCR, pose) and the D-FINE upgrade.
+  benchmark; a detector fine-tune on passthrough captures if needed.
+- **Later**: optional extensions (speech, OCR, pose).

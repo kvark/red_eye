@@ -1,12 +1,15 @@
-//! Run the detector on an image and render the graded view with boxes.
+//! Run a detector on an image and render the graded view with boxes.
 //!
 //! ```text
 //! cargo run --release --example detect -- ref/yolox_nano.safetensors photo.jpg [out.png] [nano|tiny]
+//! cargo run --release --example detect -- ref/dfine_nano_640x480/model.onnx photo.jpg [out.png]
 //! ```
 //!
-//! Weights come from `tools/yolox_to_safetensors.py`. The image is turned
-//! into the same I420 frame the headset camera produces, so this exercises
-//! the device path: GPU preprocessing, the network, decode, NMS.
+//! A `.safetensors` checkpoint (`tools/fetch_yolox.sh`) runs YOLOX; an
+//! `.onnx` model (`tools/fetch_dfine.sh`, prepared at 640×480) runs D-FINE.
+//! The image is turned into the same I420 frame the headset camera
+//! produces, so this exercises the device path: GPU preprocessing, the
+//! network, decode.
 
 use std::path::Path;
 use std::time::Instant;
@@ -14,6 +17,7 @@ use std::time::Instant;
 use red_eye::frame::{Eye, Frame};
 use red_eye::grade::Grade;
 use red_eye::perception::Detector;
+use red_eye::perception::dfine::Dfine;
 use red_eye::perception::yolox::{Config, Yolox};
 use red_eye::render::BoxInstance;
 
@@ -23,7 +27,9 @@ fn main() {
     let (weights, image) = match &args[..] {
         [w, i, ..] => (w.clone(), i.clone()),
         _ => {
-            eprintln!("usage: detect <weights.safetensors> <image> [out.png] [nano|tiny]");
+            eprintln!(
+                "usage: detect <yolox.safetensors | dfine.onnx> <image> [out.png] [nano|tiny]"
+            );
             std::process::exit(2);
         }
     };
@@ -44,8 +50,13 @@ fn main() {
 
     // One context for the detector and the renderer, as on the headset.
     let context = red_eye::init_context(None).expect("no GPU");
-    let mut detector =
-        Yolox::new(config, Path::new(&weights), Some(context.clone())).expect("detector");
+    let mut detector: Box<dyn Detector> = if weights.ends_with(".onnx") {
+        Box::new(
+            Dfine::new(Path::new(&weights), [640, 480], Some(context.clone())).expect("D-FINE"),
+        )
+    } else {
+        Box::new(Yolox::new(config, Path::new(&weights), Some(context.clone())).expect("YOLOX"))
+    };
     // The first run includes pipeline warm-up; time the second.
     detector.detect(&frame);
     let start = Instant::now();

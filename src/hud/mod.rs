@@ -12,7 +12,13 @@
 //! locked, lazily following the head, with text kept within about ±25° of
 //! centre; a rigidly head-locked HUD is uncomfortable.
 
+pub mod canvas;
+pub mod grid;
+pub mod targeting;
 pub mod text;
+pub mod view;
+
+pub use view::{Hud, Telemetry};
 
 /// The mechanics catalogued in `docs/concept.md`, in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

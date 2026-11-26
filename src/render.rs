@@ -352,6 +352,30 @@ pub fn render_graded(
     time: f32,
     boxes: &[BoxInstance],
 ) -> Vec<u8> {
+    render_offscreen(context, frame, grade, time, boxes, None)
+}
+
+/// Something drawn over the graded frame, such as the HUD, which records
+/// work of its own before the frame's pass.
+pub trait Overlay {
+    /// Record anything that must precede the pass, such as rendering into
+    /// an offscreen texture.
+    fn prepare(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder);
+    /// Draw into the frame's pass, over the grade and boxes.
+    fn draw(&self, pass: &mut gpu::RenderCommandEncoder, placement: Placement, linear_target: bool);
+    /// The frame was submitted at `sync_point`.
+    fn submitted(&mut self, sync_point: &gpu::SyncPoint);
+}
+
+/// [`render_graded`] with an [`Overlay`] drawn last.
+pub fn render_offscreen(
+    context: &gpu::Context,
+    frame: &Frame,
+    grade: &Grade,
+    time: f32,
+    boxes: &[BoxInstance],
+    mut overlay: Option<&mut dyn Overlay>,
+) -> Vec<u8> {
     let size = gpu::Extent {
         width: frame.width,
         height: frame.height,
@@ -396,6 +420,9 @@ pub fn render_graded(
     encoder.start();
     encoder.init_texture(target);
     pass.upload(context, &mut encoder, frame);
+    if let Some(overlay) = overlay.as_mut() {
+        overlay.prepare(context, &mut encoder);
+    }
     {
         let mut rp = encoder.render(
             "grade",
@@ -417,12 +444,18 @@ pub fn render_graded(
             [size.width, size.height],
             thickness,
         );
+        if let Some(overlay) = overlay.as_ref() {
+            overlay.draw(&mut rp, Placement::FULLSCREEN, false);
+        }
     }
     {
         let mut transfer = encoder.transfer("readback");
         transfer.copy_texture_to_buffer(target.into(), readback.into(), size.width * 4, size);
     }
     let sync = context.submit(&mut encoder);
+    if let Some(overlay) = overlay {
+        overlay.submitted(&sync);
+    }
     let finished = context.wait_for(&sync, 30_000).unwrap_or(false);
     let mut pixels = vec![0u8; byte_count];
     if finished {

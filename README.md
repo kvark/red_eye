@@ -22,9 +22,11 @@ Built on [Blade](https://github.com/kvark/blade) for GPU and OpenXR, and
   (a hand-built Meganeura graph), both Apache-2.0 on COCO's 80 classes,
   match their official models in onnxruntime. Preprocessing runs on the
   GPU; decoding and tracking run on a worker thread.
-- **XR app**: shows the graded left passthrough camera with tracked
-  detections outlined. It type-checks for Android but has not yet run on a
-  headset.
+- **HUD**: egui with Starcom's monospace grid, in the films' layout. Name a
+  class and it scans, then brackets the match and types "MATCH".
+- **XR app**: shows the graded left passthrough camera with the HUD and
+  tracked detections over it. It type-checks for Android but has not yet
+  run on a headset.
 
 ```sh
 pip install -r tools/requirements.txt && tools/fetch_yolox.sh && tools/fetch_dfine.sh

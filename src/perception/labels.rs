@@ -27,6 +27,15 @@ impl Label {
             .unwrap_or("unknown")
     }
 
+    /// The label with this COCO name, ignoring case.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        COCO_NAMES
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name))
+            .map(|i| Self(i as u16))
+    }
+
     pub fn category(self) -> Category {
         match self.0 {
             0 => Category::Person,
@@ -150,5 +159,8 @@ mod tests {
         assert_eq!(Label(23).name(), "giraffe");
         assert_eq!(Label(24).category(), Category::Object);
         assert_eq!(Label(80).name(), "unknown");
+        assert_eq!(Label::from_name("Motorcycle"), Some(Label(3)));
+        assert_eq!(Label::from_name(" cell phone "), Some(Label(67)));
+        assert_eq!(Label::from_name("hoverboard"), None);
     }
 }

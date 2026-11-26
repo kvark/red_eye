@@ -309,6 +309,39 @@ Notes:
 - On lavapipe a frame takes about 1 s with YOLOX-Nano and 4 s with D-FINE-N;
   that is the CPU emulating a GPU and says nothing about the Quest.
 
+## HUD
+
+The HUD is egui, painted by `blade-egui`, with its monospace text drawn by
+the grid from Starcom (`src/hud/grid.rs`, copied, MIT, same author). The
+grid puts a whole panel of glyph cells into one batch of textured quads
+while egui keeps fonts, shaping and the glyph atlas. That suits the films'
+terminal-like readouts and the Quest's per-dispatch cost. Moving the grid
+into `blade-egui`, so Starcom and RedEye share it, is a later Blade change.
+
+- **One layout per frame.** `hud::canvas::Canvas` runs egui into an
+  offscreen sRGB texture with premultiplied alpha. Each eye then composites
+  it with the camera image's placement, so normalised track rectangles map
+  straight onto it. Nothing is laid out twice for stereo, and the texture can
+  become a compositor quad layer once Blade supports layers.
+- **Layout** (`hud::view`, T2's grammar): an ANALYSIS block and a TRACKING
+  block in the top corners, with churning filler around real telemetry and
+  track identities; a status stack mid-right (scan mode, target, status,
+  probability), typed out whenever targeting changes; the state word
+  bottom-centre ("SCANNING", then "MATCH ■"); and corner brackets with the
+  class name around the matched object. Positions and sizes are fractions
+  of the canvas. A dark offset copy under every glyph keeps text legible
+  over bright passthrough.
+- **Targeting** (`hud::targeting`): a named COCO class. The largest
+  confirmed track of that class matches, and the match sticks to its track
+  while the track lives. Until voice commands land, the XR app reads the
+  name from `/data/local/tmp/red_eye/target`. While no target is named,
+  debug boxes outline every confirmed track; once one is, the HUD's
+  brackets take over.
+- **Font**: Share Tech Mono (Carrois Type Design, SIL OFL 1.1, bundled with
+  its licence in `assets/fonts/`), loaded into egui unmodified.
+- **Next**: voice commands ("track the motorcycle") through Moonshine-tiny
+  (MIT, ONNX), mapping the transcript to a class through a synonym table.
+
 ## Frame budget at 24 Hz
 
 41.7 ms per perception frame, of which roughly 20 ms of GPU time is
@@ -360,9 +393,10 @@ them.
   importer, both matching onnxruntime; GPU preprocessing; decode and
   tracking on a worker thread; boxes over the graded view in the XR app.
   Details under "Detector implementation".
-- **M3**: the Blade XR work (layers, passthrough with the colour map,
-  environment depth, past poses); world-space targets; HUD text (SDF atlas,
-  typewriter, scroll); target lock, object ID, data scroll, boot, damage.
+- **M3 (HUD part host-verified)**: HUD text and panels through egui and
+  the Starcom grid, named-target MATCH with brackets, data blocks. Still to
+  come: the Blade XR work (layers, passthrough with the colour map,
+  environment depth, past poses), world-space targets, boot and damage.
 - **M4**: the rest of the core mechanics: acquisition inset, size
   assessment, threat assessment, compass. Adreno kernel work driven by the
   benchmark; a detector fine-tune on passthrough captures if needed.

@@ -1,7 +1,7 @@
 //! The RedEye XR application.
 //!
 //! The left passthrough camera, graded red, drawn to both eyes at display
-//! rate, with detections outlined over it. Detection runs on a worker
+//! rate, with detections outlined over it and the HUD on top. Detection runs on a worker
 //! thread sharing the GPU context and never holds up a frame. The OpenXR
 //! plumbing is taken from DinoVision, where it was proven on a Quest 3.
 //!
@@ -38,8 +38,12 @@ use log::{info, warn};
 use openxr as xr;
 use red_eye::frame::Eye;
 use red_eye::grade::Grade;
+use red_eye::hud::canvas::Canvas;
+use red_eye::hud::{Hud, Telemetry};
 use red_eye::perception::Detector;
+use red_eye::perception::Label;
 use red_eye::perception::dfine::Dfine;
+use red_eye::perception::track::Track;
 use red_eye::perception::track::TrackerConfig;
 use red_eye::perception::worker::Worker;
 use red_eye::perception::yolox::{Config, Yolox};
@@ -72,6 +76,30 @@ const CONFIRM_HITS: u32 = 2;
 
 /// Outline thickness in eye-buffer pixels.
 const BOX_THICKNESS: f32 = 3.0;
+
+/// The class to look for, by COCO name, until voice commands set it:
+///
+/// ```text
+/// adb shell "echo motorcycle > /data/local/tmp/red_eye/target"
+/// adb shell rm /data/local/tmp/red_eye/target       # stand down
+/// ```
+///
+/// With a target, the HUD brackets the match and the debug boxes go away.
+const TARGET_PATH: &str = "/data/local/tmp/red_eye/target";
+const TARGET_POLL: Duration = Duration::from_secs(1);
+
+/// The HUD canvas covers the camera image at its own resolution, laid out
+/// at one pixel per point.
+const HUD_SIZE: [u32; 2] = [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32];
+
+fn read_target() -> Option<Label> {
+    let name = std::fs::read_to_string(TARGET_PATH).ok()?;
+    let label = Label::from_name(&name);
+    if label.is_none() && !name.trim().is_empty() {
+        warn!("{TARGET_PATH}: {:?} is not a COCO class", name.trim());
+    }
+    label
+}
 
 fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
     let dfine = std::path::PathBuf::from(DFINE_PATH);
@@ -141,6 +169,11 @@ struct App {
     grade: Grade,
     linear_target: bool,
     box_pass: BoxPass,
+    hud_canvas: Canvas,
+    hud: Hud,
+    tracks: Vec<Track>,
+    last_target_poll: Instant,
+    detect_hz: f32,
     detector: Option<Worker>,
     last_detect: Instant,
     shown_generation: u64,
@@ -170,6 +203,11 @@ impl App {
             ),
             linear_target: is_srgb(format),
             box_pass: BoxPass::new(context, format),
+            hud_canvas: Canvas::new(context, HUD_SIZE, 1.0, format),
+            hud: Hud::default(),
+            tracks: Vec::new(),
+            last_target_poll: Instant::now() - TARGET_POLL,
+            detect_hz: 0.0,
             detector: spawn_detector(context),
             last_detect: Instant::now(),
             shown_generation: 0,
@@ -253,16 +291,37 @@ impl App {
             self.shown_generation = worker.generation();
             self.detections += 1;
             self.detect_latency_ms = observation.latency_ms;
-            let boxes: Vec<_> = observation
-                .tracks
-                .iter()
-                .filter(|t| t.is_confirmed(CONFIRM_HITS))
-                .map(|t| BoxInstance::new(&t.rect, red_eye::hud::outline_color(t.label.category())))
-                .collect();
+            self.tracks = observation.tracks;
+            // Debug boxes only while scanning everything; a named target
+            // gets the HUD's brackets instead.
+            let boxes: Vec<_> = if self.hud.targeting.target().is_some() {
+                Vec::new()
+            } else {
+                self.tracks
+                    .iter()
+                    .filter(|t| t.is_confirmed(CONFIRM_HITS))
+                    .map(|t| {
+                        BoxInstance::new(&t.rect, red_eye::hud::outline_color(t.label.category()))
+                    })
+                    .collect()
+            };
             self.box_pass.set_boxes(context, &boxes);
         }
 
         let time = self.start.elapsed().as_secs_f32();
+        if self.last_target_poll.elapsed() >= TARGET_POLL {
+            self.last_target_poll = Instant::now();
+            self.hud.set_target(read_target(), time);
+        }
+        // Lay out the HUD once; each eye composites it.
+        let telemetry = Telemetry {
+            detect_hz: self.detect_hz,
+            latency_ms: self.detect_latency_ms,
+        };
+        let (hud, tracks) = (&mut self.hud, &self.tracks);
+        self.hud_canvas.render(context, encoder, time as f64, |ui| {
+            hud.draw(ui, time, tracks, &telemetry)
+        });
         for eye in 0..frame.xr_view_count() {
             let view = frame.xr_view(eye);
             let fov = [
@@ -292,19 +351,26 @@ impl App {
                 [extent.width, extent.height],
                 BOX_THICKNESS,
             );
+            // Placed like the camera image, so track rectangles line up.
+            self.hud_canvas
+                .composite(&mut pass, placement, self.linear_target, 1.0);
         }
 
         encoder.present(frame);
-        self.last_submit = Some(context.submit(encoder));
+        let sync = context.submit(encoder);
+        self.hud_canvas.after_submit(&sync);
+        self.last_submit = Some(sync);
         self.frames += 1;
 
         if self.last_report.elapsed() >= Duration::from_secs(5) {
             let secs = self.last_report.elapsed().as_secs_f64();
+            self.detect_hz = (self.detections as f64 / secs) as f32;
             info!(
-                "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms",
+                "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | {:?}",
                 self.frames as f64 / secs,
-                self.detections as f64 / secs,
+                self.detect_hz,
                 self.detect_latency_ms,
+                self.hud.targeting.phase(),
             );
             self.frames = 0;
             self.detections = 0;
@@ -320,6 +386,7 @@ impl App {
         }
         self.grade_pass.destroy(context);
         self.box_pass.destroy(context);
+        self.hud_canvas.destroy(context);
         context.destroy_xr_surface(&mut self.surface);
     }
 }

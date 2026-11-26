@@ -34,6 +34,7 @@ jobs:
       - run: cargo run --locked --release --example preview -- - out
       - run: cargo run --locked --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
       - run: cargo run --locked --release --example detect -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg out/detect-dfine.png
+      - run: cargo run --locked --release --example hud -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg bicycle out
       - name: YOLOX through the ONNX importer
         run: |
           cargo run --locked --release --example onnx_check -- ref/yolox_nano_onnx

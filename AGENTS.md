@@ -26,9 +26,14 @@ frame budget, milestones, upstream work).
 | `src/perception/preprocess.rs` | Each model's `InputSpec`; GPU preprocessing into the session's input buffer, and its CPU reference |
 | `src/perception/worker.rs` | Detector thread: drops frames while busy, publishes observations |
 | `src/hud/` | Mechanics as time-driven state; text effects |
+| `src/hud/canvas.rs` | egui laid out once per frame into an offscreen texture, composited per eye |
+| `src/hud/grid.rs` | Monospace text as one quad batch, copied from Starcom (keep close to it) |
+| `src/hud/targeting.rs`, `src/hud/view.rs` | Named target and its match; the T2-style panels and MATCH |
+| `assets/fonts/` | Share Tech Mono (SIL OFL), the HUD face, with its licence |
 | `android-xr/` | OpenXR app (`cdylib`); `camera.rs` is the Camera2 passthrough camera |
 | `examples/preview.rs` | Headless render of the grade presets to PNG |
 | `examples/detect.rs` | Detector on an image, graded view with boxes to PNG |
+| `examples/hud.rs` | Detector, tracker, a named target and the HUD over a photo, to PNGs |
 | `tests/gpu.rs` | GPU tests (`#[ignore]`, run on lavapipe or a real device) |
 | `tests/yolox.rs`, `tests/dfine.rs` | Detectors against onnxruntime references (need `ref/`) |
 | `examples/onnx_check.rs` | An ONNX export through Meganeura's importer against onnxruntime |
@@ -43,6 +48,7 @@ cargo test --release -- --include-ignored   # + GPU and detector tests (lavapipe
 cargo run --release --example preview -- [image] [out-dir]
 cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
 cargo run --release --example detect -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg out/detect.png
+cargo run --release --example hud -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg bicycle out
 python tools/onnx_reference.py model.onnx ref/candidate 1,3,480,640 [image] [--simplify]   # evaluate a candidate export
 cargo run --release --example onnx_check -- ref/candidate
 cargo fmt --all
@@ -53,6 +59,7 @@ cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 adb shell mkdir -p /data/local/tmp/red_eye && adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx   # preferred when present
+adb shell "echo motorcycle > /data/local/tmp/red_eye/target"   # name a target until voice commands land
 ```
 
 ## Rules
@@ -68,8 +75,9 @@ adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.on
   `yolox::Network` must keep the reference's order; `tests/yolox.rs` catches
   a slip.
 - **Pins move together.** `blade-graphics` must be the exact revision
-  Meganeura pins, so the `Arc<Context>` types match. `openxr` must be the
-  version Blade uses. Bump them in one commit.
+  Meganeura pins, so the `Arc<Context>` types match; `blade-egui` and
+  `blade-util` share that revision. `openxr` and `egui` must be the versions
+  Blade uses. Bump them in one commit.
 - **The display path never waits on inference.** The renderer draws the
   latest `Observation`; models run on a worker thread and frames are dropped,
   never queued.

@@ -34,8 +34,7 @@ for model in ${*:-nano tiny}; do
     "$PYTHON" -I tools/yolox_to_safetensors.py "$onnx" "ref/yolox_$model.safetensors"
     "$PYTHON" -I tools/yolox_reference.py "$onnx" "ref/yolox_${model}_reference"
     "$PYTHON" -I tools/yolox_reference.py "$onnx" "ref/yolox_${model}_dog" ref/dog.jpg
-    # The official export through Meganeura's ONNX importer, cut after the
-    # Focus slicing (the first Concat) that preprocessing already does.
+    # The official export, whole, for Meganeura's ONNX importer.
     "$PYTHON" -I tools/onnx_reference.py "$onnx" "ref/yolox_${model}_onnx" \
-        1,3,416,416 ref/dog.jpg --scale 1 --start-at first:Concat
+        1,3,416,416 ref/dog.jpg --scale 1
 done

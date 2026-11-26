@@ -103,7 +103,7 @@ the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
 5. **Example**: an `examples-android` passthrough sample, so this is tested
    in Blade itself and not only through RedEye.
 
-### Meganeura (rev `3385527`, 0.3)
+### Meganeura (rev `a964c5b`, 0.3)
 
 Meganeura is our crate. What follows is its state today. The gaps are
 work items for us, not constraints on RedEye; they are collected under
@@ -112,13 +112,12 @@ the stack end to end and was not optimised for the Quest.
 
 - **The ONNX importer covers CNN detectors, not yet DETRs.** Since
   `3385527` it imports grouped and depthwise Conv, ConvTranspose, Resize,
-  TopK (k ≤ 64) and GridSample. Shapes must be static, and `Slice` must
-  have unit steps. Exports with symbolic shapes become importable after
-  `tools/onnx_reference.py` fixes the input shape and constant-folds them.
-  Checked with `examples/onnx_check.rs` against onnxruntime:
-  - **YOLOX-Nano and YOLOX-Tiny** (official exports) import and match to
-    2.1e-5 and 1.9e-5, once cut after the Focus slicing (step-2 `Slice`),
-    which our preprocessing performs anyway. CI runs both.
+  TopK (k ≤ 64) and GridSample, and since `a964c5b` strided `Slice`.
+  Shapes must be static: exports with symbolic shapes become importable
+  after `tools/onnx_reference.py` fixes the input shape and constant-folds
+  them. Checked with `examples/onnx_check.rs` against onnxruntime:
+  - **YOLOX-Nano and YOLOX-Tiny** (official exports, whole, Focus
+    included) import and match to 2.1e-5 and 1.9e-5. CI runs both.
   - **D-FINE-N** (`onnx-community/dfine-nano-coco-ONNX`, Apache-2.0) folds
     cleanly at 640×640 and 640×480, then stops at the ops in item 3 below.
 - **The hand-built graph API covers what we need for CNNs and ViTs**:
@@ -179,9 +178,9 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
    - `Clip` (×9): constant bounds, some one-sided (`min` only).
    - `Pad` (×1): constant zero, one pixel on the bottom and right of the
      stem.
-4. **More importer coverage**: `Slice` with steps (YOLOX's Focus; we cut
-   around it today), AveragePool, PRelu/HardSwish, Min/Max, Where and
-   comparisons, non-last-axis Softmax. Candidate models are evaluated
+4. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
+   Where and comparisons, non-last-axis Softmax. (Strided `Slice` landed
+   in `a964c5b`.) Candidate models are evaluated
    from their exports with `tools/onnx_reference.py` and
    `examples/onnx_check.rs` before anything is hand-written.
 5. **Adreno kernels**:
@@ -272,10 +271,11 @@ Notes:
 - The Focus slicing is folded into preprocessing, so the graph input is
   `[12, H/2, W/2]` and needs no strided slice. The weights are
   resolution-independent; the app runs 416×320 to match the cameras' 4:3.
-- The hand-built graph and the ONNX import of the same export agree, so
-  either can serve. The hand-built one stays for now: it reads the Focus
-  layout and writes the flat output the decoder expects, with no Python
-  step in between.
+- The hand-built graph and the ONNX import of the whole official export
+  agree, so either can serve. The hand-built one stays for now: its input
+  is the Focus layout our preprocessing writes, so it skips the eight
+  strided slices (11 fewer dispatches), and it writes the flat output the
+  decoder reads, with no Python step to prepare the model.
 - The network needed nothing new from Meganeura: `conv2d`, `conv2d_dw`,
   `max_pool_2d`, `upsample_2x`, two-input `concat` (also used as a flat
   append to join the three output levels), `silu` and `sigmoid`.

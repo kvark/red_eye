@@ -127,10 +127,19 @@ the stack end to end and was not optimised for the Quest.
     selected element (see item 3 below).
   - This export still goes through onnx-simplifier (`--simplify`). It
     builds D-FINE's box-weighting table with `Pow(x, 1/15)` from two scalar
-    initializers, and the importer folds constants but not through
-    initializers, which it treats as parameters. The simplifier's
-    Pad-into-Conv fusion is turned off, because the asymmetric convolution
-    padding it produces (`[0, 0, 1, 1]`) does not import.
+    parameters (`up`, `reg_scale`) through two `Abs` ops, and the importer's
+    folder has no `Abs` arm, so the table never becomes a constant and the
+    `Pow` exponent is unsupported. (The folder does read initializers; an
+    earlier note here blamed them, wrongly.) The simplifier's Pad-into-Conv
+    fusion is turned off, because the asymmetric convolution padding it
+    produces (`[0, 0, 1, 1]`) does not import.
+  - **Moonshine-tiny** (`onnx-community/moonshine-tiny-ONNX`, MIT), the
+    speech model for voice commands. After `--simplify`, two gaps remain:
+    `InstanceNormalization` (one, in the encoder stem) and a `Gather` of the
+    token embedding at runtime indices (the importer makes every graph input
+    F32). With those two patched by hand, the encoder (2 s or 4 s of
+    16 kHz audio, 310 dispatches) matches onnxruntime to 7e-6, and the
+    decoder (449 dispatches per step) to 2e-5.
 - **The hand-built graph API covers what we need for CNNs and ViTs**:
   `conv2d`, `conv2d_dw` (depthwise), `max_pool_2d`, `upsample_2x`
   (nearest), `concat`/`split`, `group_norm`/`layer_norm`, attention, `clamp`
@@ -184,16 +193,24 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      single-dispatch select (bitonic or radix) would bring D-FINE near
      YOLOX's dispatch count. This decides whether D-FINE is affordable on
      the Quest.
-   - Fold through scalar initializers that feed only constant arithmetic
-     (D-FINE's `up` and `reg_scale` into `Pow`), so the raw export imports
-     without onnx-simplifier.
+   - Fold `Abs` (D-FINE's box-weighting table) and `Transpose`
+     (Moonshine's rotary tables), so raw exports import without
+     onnx-simplifier.
    - Asymmetric convolution padding, which simplifiers and TensorFlow
      exports produce.
-4. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
+4. **Voice commands (Moonshine-tiny)**:
+   - `InstanceNormalization`, or `GroupNorm` over 3D input. Moonshine's
+     stem normalises one 287k-element row, so a single-row reduction kernel
+     must not be slow.
+   - Integer graph inputs (`graph.input_u32`), so a token-id input can feed
+     `Gather` on the embedding.
+   - Without onnx-simplifier, the decoder also needs `Trilu`, plus
+     `Slice` with runtime bounds, for its causal mask and rotary tables.
+5. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
    non-last-axis Softmax. Candidate models are evaluated from their
    exports with `tools/onnx_reference.py` and `examples/onnx_check.rs`
    before anything is hand-written.
-5. **Adreno kernels**:
+6. **Adreno kernels**:
    - int8 convolution and matmul on packed `dot4I8Packed`. It exists today
      for LLM GEMV only; extending it to conv is likely the largest win for
      CNNs, given no f16 arithmetic.
@@ -203,7 +220,7 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
    - Fusion of conv, BatchNorm and activation, and of our preprocessing into
      the first conv.
    - Fewer dispatches and barriers per graph.
-6. **Training gaps for fine-tuning**: a `Conv2dDw` backward pass (pose and
+7. **Training gaps for fine-tuning**: a `Conv2dDw` backward pass (pose and
    face nets are depthwise-heavy), and detection losses (focal,
    GIoU/L1 box regression) with CPU-side Hungarian matching.
 
@@ -339,8 +356,17 @@ into `blade-egui`, so Starcom and RedEye share it, is a later Blade change.
   brackets take over.
 - **Font**: Share Tech Mono (Carrois Type Design, SIL OFL 1.1, bundled with
   its licence in `assets/fonts/`), loaded into egui unmodified.
-- **Next**: voice commands ("track the motorcycle") through Moonshine-tiny
-  (MIT, ONNX), mapping the transcript to a class through a synonym table.
+- **Next: voice commands** ("track the motorcycle") through Moonshine-tiny
+  (MIT, 27M). It takes the raw 16 kHz waveform, with no spectrogram; a 2 s
+  window suffices for commands. Estimated Quest cost is about 38 ms per
+  utterance at 2 s (0.76 GMAC encoder plus up to 8 decoder steps of 0.38
+  GMAC), one-off rather than per frame. On synthetic espeak speech, free
+  greedy decoding gets only 5 of 10 object words ("bicycle" became
+  "mysql"). Decoding constrained to the command grammar ("track | target |
+  find | lock on" + "the | a" + a COCO label, or "cancel") gets 8 to 10 of
+  10. So the app decodes through a token trie of that grammar, precomputed
+  offline from the tokenizer, plus a synonym table. Blocked on Meganeura
+  item 4.
 
 ## Frame budget at 24 Hz
 

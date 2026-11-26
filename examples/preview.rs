@@ -37,7 +37,7 @@ fn main() {
         ("t2", Grade::t2()),
         ("damaged", Grade::damaged()),
     ] {
-        let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0);
+        let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0, &[]);
         let path = out_dir.join(format!("preview-{name}.png"));
         image::RgbaImage::from_raw(frame.width, frame.height, pixels)
             .unwrap()

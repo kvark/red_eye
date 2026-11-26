@@ -21,7 +21,7 @@ fn shader_grade_matches_reference() {
         row.fill(y as u8);
     }
     let grade = Grade::default().tone_only();
-    let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0);
+    let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0, &[]);
 
     let mut worst = 0.0f32;
     for y in 0..height as usize {
@@ -34,5 +34,85 @@ fn shader_grade_matches_reference() {
     assert!(
         worst <= 1.5 / 255.0,
         "shader deviates from reference by {worst}"
+    );
+}
+
+/// The GPU preprocessing must produce exactly what the CPU reference does,
+/// on a frame with real chroma and a letterbox in both directions.
+#[test]
+#[ignore = "requires a working GPU context"]
+fn yolox_preprocess_matches_reference() {
+    use blade_graphics as gpu;
+    use red_eye::perception::preprocess::GpuPreprocess;
+    use red_eye::perception::yolox::{self, Config};
+
+    let context = red_eye::init_context(None).expect("no GPU");
+    let (width, height) = (320u32, 240u32);
+    let rgb: Vec<u8> = (0..height)
+        .flat_map(|y| {
+            (0..width).flat_map(move |x| {
+                [
+                    (x * 255 / width) as u8,
+                    (y * 255 / height) as u8,
+                    ((x ^ y) & 0xff) as u8,
+                ]
+            })
+        })
+        .collect();
+    let frame = Frame::from_rgb8(width, height, &rgb, Eye::Left);
+
+    for config in [Config::nano().at_input(416, 320), Config::nano()] {
+        let mut expected = Vec::new();
+        let cpu_letterbox = yolox::preprocess(&frame, &config, &mut expected);
+
+        let bytes = (config.input_len() * 4) as u64;
+        let output = context.create_buffer(gpu::BufferDesc {
+            name: "preprocess-output",
+            size: bytes,
+            memory: gpu::Memory::Shared,
+        });
+        let mut pre = GpuPreprocess::new(&context);
+        let gpu_letterbox = pre.run(&context, &frame, &config, output.into());
+        pre.destroy(&context);
+        assert_eq!(gpu_letterbox, cpu_letterbox);
+        let got: &[f32] =
+            unsafe { std::slice::from_raw_parts(output.data() as *const f32, config.input_len()) };
+        let worst = got
+            .iter()
+            .zip(&expected)
+            .map(|(g, e)| (g - e).abs())
+            .fold(0.0f32, f32::max);
+        context.destroy_buffer(output);
+        assert!(
+            worst < 0.05,
+            "{:?}: GPU preprocessing deviates by {worst}",
+            config.input_size
+        );
+    }
+}
+
+/// Box outlines land on the image coordinates they were given.
+#[test]
+#[ignore = "requires a working GPU context"]
+fn boxes_outline_their_rect() {
+    use red_eye::perception::Rect;
+    use red_eye::render::BoxInstance;
+
+    let context = red_eye::init_context(None).expect("no GPU");
+    // Black frame; at 800 px the offscreen helper draws 2 px lines.
+    let frame = Frame::new(800, 800, Eye::Left);
+    let rect = Rect::new(0.25, 0.25, 0.75, 0.75);
+    let boxes = [BoxInstance::new(&rect, [1.0, 1.0, 1.0, 1.0])];
+    let pixels = red_eye::render::render_graded(&context, &frame, &Grade::t1(), 0.0, &boxes);
+    let at = |x: usize, y: usize| &pixels[(y * 800 + x) * 4..][..3];
+    assert_eq!(at(200, 400), [255, 255, 255], "left edge");
+    assert_eq!(at(400, 600), [255, 255, 255], "bottom edge");
+    assert!(
+        at(400, 400).iter().all(|&c| c < 10),
+        "inside stays graded black"
+    );
+    assert!(
+        at(100, 100).iter().all(|&c| c < 10),
+        "outside stays graded black"
     );
 }

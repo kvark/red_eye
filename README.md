@@ -16,19 +16,19 @@ Built on [Blade](https://github.com/kvark/blade) for GPU and OpenXR, and
 
 ## Status
 
-Milestone 0, the skeleton:
-
-- The red grade (T1, T2 and damaged presets) is shared between a WGSL pass
-  and the `XR_FB_passthrough` colour map, and the two are verified to agree on
-  the GPU.
-- A headless preview renders the grades.
-- An IoU tracker and the HUD text effects are in place.
-- The XR app shows the graded left passthrough camera. It type-checks but has
-  not yet run on a device.
+- **Grade**: T1, T2 and damaged presets, shared between a WGSL pass and the
+  `XR_FB_passthrough` colour map, and verified to agree on the GPU.
+- **Detector**: YOLOX (Apache-2.0, COCO's 80 classes) runs as a Meganeura
+  graph and matches the official ONNX model in onnxruntime. Preprocessing
+  runs on the GPU; decoding, NMS and tracking run on a worker thread.
+- **XR app**: shows the graded left passthrough camera with tracked
+  detections outlined. It type-checks for Android but has not yet run on a
+  headset.
 
 ```sh
-cargo test -- --include-ignored
-cargo run --release --example preview -- photo.jpg out
+pip install -r tools/requirements.txt && tools/fetch_yolox.sh
+cargo test --release -- --include-ignored
+cargo run --release --example detect -- ref/yolox_nano.safetensors photo.jpg out/detect.png
 ```
 
 ## License

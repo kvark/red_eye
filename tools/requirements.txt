@@ -1,0 +1,6 @@
+# Host-side tooling only; nothing here ships in the app.
+numpy
+onnx
+onnxruntime
+pillow
+safetensors

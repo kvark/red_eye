@@ -46,3 +46,16 @@ pub enum Mechanic {
     /// M14: speech level and pitch readouts.
     AudioAnalysis,
 }
+
+/// Outline colour per category for the box view: white for people, as T2
+/// traces its subjects; the films' schematic cyan for vehicles; dimmer
+/// tones for the rest, so people read first.
+pub fn outline_color(category: crate::perception::Category) -> [f32; 4] {
+    use crate::perception::Category;
+    match category {
+        Category::Person => [1.0, 1.0, 1.0, 1.0],
+        Category::Vehicle => [0.45, 0.95, 1.0, 1.0],
+        Category::Animal => [1.0, 0.85, 0.55, 0.9],
+        Category::Object => [1.0, 0.6, 0.55, 0.7],
+    }
+}

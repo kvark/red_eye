@@ -1,6 +1,7 @@
 #!/bin/sh
 # Fetch the official YOLOX exports (Megvii, Apache-2.0) and prepare what the
-# app and tests use: converted safetensors and onnxruntime references.
+# app and tests use: converted safetensors, onnxruntime references, and a
+# cut export for the ONNX importer check (examples/onnx_check.rs).
 #
 #   pip install -r tools/requirements.txt
 #   tools/fetch_yolox.sh            # nano and tiny
@@ -33,4 +34,8 @@ for model in ${*:-nano tiny}; do
     "$PYTHON" -I tools/yolox_to_safetensors.py "$onnx" "ref/yolox_$model.safetensors"
     "$PYTHON" -I tools/yolox_reference.py "$onnx" "ref/yolox_${model}_reference"
     "$PYTHON" -I tools/yolox_reference.py "$onnx" "ref/yolox_${model}_dog" ref/dog.jpg
+    # The official export through Meganeura's ONNX importer, cut after the
+    # Focus slicing (the first Concat) that preprocessing already does.
+    "$PYTHON" -I tools/onnx_reference.py "$onnx" "ref/yolox_${model}_onnx" \
+        1,3,416,416 ref/dog.jpg --scale 1 --start-at first:Concat
 done

@@ -32,3 +32,7 @@ jobs:
       - run: cargo test --locked --release -- --include-ignored
       - run: cargo run --locked --release --example preview -- - out
       - run: cargo run --locked --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
+      - name: YOLOX through the ONNX importer
+        run: |
+          cargo run --locked --release --example onnx_check -- ref/yolox_nano_onnx
+          cargo run --locked --release --example onnx_check -- ref/yolox_tiny_onnx

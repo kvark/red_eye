@@ -30,7 +30,8 @@ frame budget, milestones, upstream work).
 | `examples/detect.rs` | Detector on an image, graded view with boxes to PNG |
 | `tests/gpu.rs` | GPU tests (`#[ignore]`, run on lavapipe or a real device) |
 | `tests/yolox.rs` | YOLOX against onnxruntime references (needs `ref/`) |
-| `tools/` | Python host tooling: weight conversion, references (`fetch_yolox.sh`) |
+| `examples/onnx_check.rs` | An ONNX export through Meganeura's importer against onnxruntime |
+| `tools/` | Python host tooling: weight conversion, references (`fetch_yolox.sh`, `onnx_reference.py`) |
 
 ## Commands
 
@@ -40,6 +41,8 @@ pip install -r tools/requirements.txt && tools/fetch_yolox.sh   # weights and re
 cargo test --release -- --include-ignored   # + GPU and YOLOX tests (lavapipe: apt install mesa-vulkan-drivers)
 cargo run --release --example preview -- [image] [out-dir]
 cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
+python tools/onnx_reference.py model.onnx ref/candidate 1,3,480,640 [image]   # evaluate a candidate export
+cargo run --release --example onnx_check -- ref/candidate
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --target aarch64-linux-android -p red-eye-xr -- -D warnings

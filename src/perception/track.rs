@@ -6,14 +6,14 @@
 //! are what the HUD keys its per-target state on (lock animation, analysis
 //! panel, assigned designation).
 
-use super::{Class, Detection, Rect};
+use super::{Detection, Label, Rect};
 
 pub type TrackId = u32;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     pub id: TrackId,
-    pub class: Class,
+    pub label: Label,
     /// Smoothed box.
     pub rect: Rect,
     pub score: f32,
@@ -77,11 +77,11 @@ impl Tracker {
 
     /// Advance by one detector frame.
     pub fn update(&mut self, detections: &[Detection]) -> &[Track] {
-        // Greedy association by descending overlap, within a class.
+        // Greedy association by descending overlap, within a label.
         let mut pairs = Vec::new();
         for (ti, track) in self.tracks.iter().enumerate() {
             for (di, det) in detections.iter().enumerate() {
-                if det.class != track.class {
+                if det.label != track.label {
                     continue;
                 }
                 let iou = track.rect.iou(&det.rect);
@@ -124,7 +124,7 @@ impl Tracker {
             }
             self.tracks.push(Track {
                 id: self.next_id,
-                class: det.class,
+                label: det.label,
                 rect: det.rect,
                 score: det.score,
                 hits: 1,
@@ -144,7 +144,7 @@ mod tests {
     fn person(x: f32, score: f32) -> Detection {
         Detection {
             rect: Rect::new(x, 0.2, x + 0.2, 0.9),
-            class: Class::Person,
+            label: Label::PERSON,
             score,
         }
     }
@@ -178,11 +178,11 @@ mod tests {
     }
 
     #[test]
-    fn classes_do_not_swap_identity() {
+    fn labels_do_not_swap_identity() {
         let mut tracker = Tracker::new(TrackerConfig::default());
         tracker.update(&[person(0.1, 0.9)]);
         let car = Detection {
-            class: Class::Car,
+            label: Label(2),
             ..person(0.1, 0.9)
         };
         let tracks = tracker.update(&[car]);

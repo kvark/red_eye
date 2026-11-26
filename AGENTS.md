@@ -20,7 +20,7 @@ frame budget, milestones, upstream work).
 | `src/source.rs` | `FrameSource`; test pattern and still image |
 | `src/grade.rs` | Red grade (presets, LUT for `XR_FB_passthrough`) |
 | `src/render.rs`, `src/shaders/` | Blade passes; WGSL lives in `.wgsl` files |
-| `src/perception/` | Detections, tracking, the `Observation` the HUD reads |
+| `src/perception/` | Detector trait, COCO labels, tracking, the `Observation` the HUD reads |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `android-xr/` | OpenXR app (`cdylib`); `camera.rs` is the Camera2 passthrough camera |
 | `examples/preview.rs` | Headless render of the grade presets to PNG |

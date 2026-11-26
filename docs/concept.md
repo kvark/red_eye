@@ -24,23 +24,25 @@ Research notes, corrections to popular memory, and sources are at the end.
 ## Mechanics
 
 Ratings are for real-time, on-device work on Quest 3. "Needs" lists the
-perception a real system requires. M-numbers match [`hud::Mechanic`](../src/hud/mod.rs).
+perception a real system requires. Almost all of it is one object
+detector (boxes with class names) plus the platform's depth; see
+`docs/technology.md`, "Model plan". M-numbers match [`hud::Mechanic`](../src/hud/mod.rs).
 
 | # | Mechanic | Film | Needs | Rating | Milestone |
 |---|---|---|---|---|---|
 | M1 | Colour grade | T1, T2 | — | easy | M1 |
-| M2 | Data scroll | T1, T2 | — (or real telemetry) | easy | M2 |
-| M3 | Target lock | T1, T2 | person detection, tracking, prediction | medium | M3 |
-| M4 | Acquisition inset | T2 | face detection, crop | medium | M4 |
-| M5 | Size assessment / MATCH | T2 | pose, metric depth, floor | medium | M4 |
-| M6 | Object identification | T1, T2 | detection, mask, crop classifier | easy–hard | M4 |
-| M7 | Threat assessment | T2 | multi-person tracking | medium | M5 |
-| M8 | Response menu | T1 | voice activity, speech-to-text | easy–medium | M5 |
-| M9 | Text reading | T1 | OCR | medium | M5 |
+| M2 | Data scroll | T1, T2 | — (or real telemetry) | easy | M3 |
+| M3 | Target lock | T1, T2 | person detection, tracking, depth, prediction | medium | M3 |
+| M4 | Acquisition inset | T2 | person detection (head region); face detection optional | medium | M4 |
+| M5 | Size assessment / MATCH | T2 | person detection, metric depth, floor; pose optional | medium | M4 |
+| M6 | Object identification | T1, T2 | detection (class name); mask optional | easy | M3 |
+| M7 | Threat assessment | T2 | person detection, tracking | medium | M4 |
+| M8 | Response menu | T1 | voice activity, speech-to-text | easy–medium | later |
+| M9 | Text reading | T1 | OCR | medium | later |
 | M10 | Expression analysis | T2 SE | face landmarks | medium | later |
-| M11 | Night vision / enhance | T2 | head yaw | easy | M2 |
-| M12 | Boot / diagnostic | T2 SE | — | easy | M2 |
-| M13 | Damage / power failure | T2 | — (battery, hand impacts) | easy | M2 |
+| M11 | Night vision / enhance | T2 | head yaw | easy | M4 |
+| M12 | Boot / diagnostic | T2 SE | — | easy | M3 |
+| M13 | Damage / power failure | T2 | — (battery, hand impacts) | easy | M3 |
 | M14 | Audio analysis | (implied) | mic level, pitch | easy | later |
 
 ### M1 Colour grade
@@ -100,20 +102,20 @@ name appears only for users who enrol themselves and consent.
 
 A status stack on the right ("SCAN MODE… SIZE ASSESSMENT… FIT PROBABILITY"),
 a number block on the left, and a large "MATCH" at bottom centre. A scan of
-the building with a grid box comes first. *Ours*: 2D keypoints plus metric
-depth plus the floor plane give height, shoulder width and inseam (hip to
-floor minus an empirical offset), compared against the wearer's own height
-from tracking. The Depth API is low resolution, so expect errors of a few
+the building with a grid box comes first. *Ours*: the person box's top and bottom,
+back-projected with metric depth and the floor plane, give height, compared
+against the wearer's own height from tracking. An optional keypoint model
+adds shoulder width and inseam (hip to floor minus an empirical offset). The Depth API is low resolution, so expect errors of a few
 centimetres. Present the numbers with false precision, as the film does.
 
 ### M6 Object identification
 
 **T2**: a solid and dashed outline traced around a motorcycle, a "VISUAL:"
 model line, and a spec table (VEHI, SIZE, TSPD…). **T1**: a boxed schematic
-with lettered callouts. *Ours*: class from the detector (easy), outline
-from a mask (medium), finer identity from zero-shot crop classification
-against a fixed vocabulary (hard). Spec tables come from a bundled
-per-class table.
+with lettered callouts. *Ours*: the detector's class name
+("VISUAL: MOTORCYCLE") and a spec table bundled per class, with the box drawn
+as a traced outline. A real silhouette from a mask, or finer identity than
+the class, is optional.
 
 ### M7 Threat assessment
 

@@ -78,18 +78,30 @@ checked before a decision depends on it.
 
 ### Blade (rev `bba0edc`)
 
-- XR support: one stereo projection layer per frame
-  (`present_xr` → `frame_stream.end`). The environment blend mode is the
-  first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
-  `context.xr_session()` exposes the session.
-- **Needed upstream** (small): let the app submit additional composition
-  layers ahead of the projection layer (a passthrough layer), and set
-  `BLEND_TEXTURE_SOURCE_ALPHA` / unpremultiplied flags on the projection
-  layer so the HUD composites over passthrough.
-- `openxr` 0.21 (Blade's version) wraps `Passthrough` and
-  `PassthroughLayer`, but not the style or colour-map calls; use the raw
-  function pointers. In 0.19, `Passthrough::start` called `pause`, so check
-  0.21 or call `xrPassthroughStartFB` directly.
+Blade is also ours. Its XR path today submits one stereo projection layer
+per frame (`present_xr` → `frame_stream.end`). The environment blend mode is
+the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
+`context.xr_session()` exposes the session.
+
+### Blade work for RedEye
+
+1. **Composition layers**: let the app submit layers beneath the projection
+   layer, starting with an `XR_FB_passthrough` layer, and set
+   `BLEND_TEXTURE_SOURCE_ALPHA` / unpremultiplied flags on the projection
+   layer so the HUD composites over passthrough.
+2. **Passthrough as a feature**: create, start and pause passthrough with the
+   session lifecycle, and set the style: the mono→RGBA colour map from
+   `Grade::mono_to_rgba_lut`, opacity, and edge colour. `openxr` 0.21 wraps
+   `Passthrough`/`PassthroughLayer` but not styles, so this goes through raw
+   function pointers. Its 0.19 `Passthrough::start` called `pause`; check 0.21.
+3. **Environment depth**: `XR_META_environment_depth` provider and swapchain,
+   exposed as a texture the HUD and perception can sample, with its
+   per-frame view and projection.
+4. **Timing and poses**: locate the head at an arbitrary past time (a camera
+   timestamp), not only at the predicted display time, so detections can be
+   placed in the world where they were seen.
+5. **Example**: an `examples-android` passthrough sample, so this is tested
+   in Blade itself and not only through RedEye.
 
 ### Meganeura (rev `aba04df`, 0.3)
 
@@ -149,7 +161,7 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
 2. **Calibration benchmark on device**: a native (non-XR) APK as in
    DinoVision's `android/`, timing conv, depthwise, matmul and attention
    archetypes and whole models, with thermal state recorded.
-3. **Ops for the detector and the heads**: bilinear Resize, AveragePool,
+3. **Ops for later models** (YOLOX needs none of them): bilinear Resize, AveragePool,
    Pad, PRelu/LeakyRelu/HardSwish, TopK, GatherElements, GridSample (for
    deformable attention in D-FINE/DEIM), a native ConvTranspose (instead of
    dilating with zeros), and a grouped Conv generalising `conv2d_dw`.
@@ -174,54 +186,71 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
 
 ## Model plan
 
-Selection rules: permissive licence (Apache/MIT/BSD); quality per FLOP;
-a small enough budget to stagger. Missing Meganeura ops are an upstream cost
-to weigh, not a veto. Where a better model needs new ops, a no-new-ops model
-is used to bring the pipeline up first. Excluded on licence grounds: Ultralytics YOLOv8/11/26
-and FastSAM (AGPL); YOLO-World (GPL); DEIMv2, SCRFD weights, MobileCLIP,
-DepthPro and CC-BY-NC Depth Anything checkpoints (non-commercial).
-**DINOv3** has a custom licence: commercial use is allowed, but
-military/weapons use is prohibited and the licence must ship with the app.
-DINOv2 is Apache-2.0.
+**One detector is the core.** A model that returns a list of boxes, each
+with a class name and a score, drives nearly everything. Add tracking and
+the platform's depth and these mechanics work:
 
-| Capability | First choice | Why / ops | Later / fallback |
-|---|---|---|---|
-| Detection (M3) | **D-FINE-N / DEIM-D-FINE-N** (3.8M, 7 GFLOPs@640, 42.8–43.0 AP, Apache) at about 512×384 | NMS-free; needs GridSample, TopK and GatherElements in Meganeura | Bring-up: **YOLOX-Nano** (0.9M, 1.08 GFLOPs@416, 25.8 AP, Apache), which needs no new ops: conv, SiLU, nearest upsample, concat, CPU NMS. Also YOLOX-Tiny; RT-DETRv2-S with discrete sampling |
-| Tracking (M3) | ByteTrack/OC-SORT-style, CPU, world space | [`perception::track`](../src/perception/track.rs) is the IoU core | appearance from backbone ROI features or OSNet x0.25 |
-| Depth (M3–M5) | **Quest Depth API** | metric and free | Depth Anything V2 Small (Apache) at low resolution, scale-aligned to the Depth API |
-| Pose (M5) | **RTMPose-t/s Halpe26** on person crops (Apache) | CSPNeXt (depthwise) + GAU attention + SimCC argmax; 26 keypoints including head-top and feet | MoveNet Lightning; BlazePose (adds a person mask) |
-| Face (M4) | **BlazeFace** on head crops (Apache) | depthwise conv; PReLU composed from ReLU and per-channel multiply; CPU decode | YuNet (MIT) |
-| Masks (M6) | BlazePose mask for the locked target | — | RF-DETR-Seg-Nano (Apache), EoMT-S on a shared ViT |
-| Identify (M6) | **SigLIP2-B/16** or **PE-Core-T16** image tower on crops, on demand, with precomputed label embeddings | plain ViT; SigLIP already exists in Meganeura | Florence-2-base on demand |
-| OCR (M9) | PP-OCRv6-tiny det + rec (Apache; recent, verify) | DB head (CPU contours) + CTC | PP-OCRv5 mobile |
-| Speech (M8) | Silero VAD + Moonshine-tiny (MIT) | CPU, or GPU idle slots | Whisper tiny/base (in Meganeura) |
-| Scene text (extra) | SmolVLM2-256M (Apache, in Meganeura) | on demand, seconds | SmolVLM2-500M |
+| Mechanic | From the detector |
+|---|---|
+| M3 target lock, M7 threat assessment | `person` boxes → tracks → world positions with depth |
+| M4 acquisition inset | the head region of a person box, cropped from the camera frame |
+| M5 size assessment | box top and bottom plus depth give height; rough, which suits the gag |
+| M6 object identification | the class name ("MOTORCYCLE"), plus a per-class spec table |
 
-**Shared backbone, if the numbers allow it.** One ViT-S/16 (DINOv2-S for
-licence cleanliness, or DINOv3-S for features) at 320×240 (300 tokens,
-about 7.6 GMACs) feeding light heads: DETR-style boxes, a mask dot-product
-head, DPT-lite depth distilled from Depth Anything V2, and keypoints. The
-DINOv2 repo publishes frozen-backbone depth and segmentation heads for
-ViT-S/14. This is the main Meganeura training job and the natural
-continuation of DinoVision. **Go/no-go: ViT-S/16 at 320×240 under about
-15 ms on the Quest.**
+M1–M2 and M11–M13 need no model at all. Only M8 (speech), M9 (OCR), M10
+(face mesh) and M14 need anything else, and they are optional extensions.
+
+**Detector: YOLOX** (Megvii, Apache-2.0), trained on COCO's 80 classes
+([`perception::labels`](../src/perception/labels.rs)). It is a plain CNN:
+conv, depthwise conv, SiLU, max-pool, nearest upsample and concat, all of
+which Meganeura's graph builder already has. The Focus slicing goes into
+our preprocessing shader. Its output is a dense grid of (box, objectness,
+80 class scores), decoded with NMS on the CPU. Official ONNX weights are
+published (`yolox_nano.onnx` 3.6 MB, `yolox_tiny.onnx` 20 MB), so the
+graph's output can be checked against onnxruntime on the host.
+
+| Variant | Params | GFLOPs | COCO AP | Use |
+|---|---|---|---|---|
+| YOLOX-Nano @416 | 0.91M | 1.08 | 25.8 | start here; leaves room in the budget |
+| YOLOX-Tiny @416 | 5.06M | 6.45 | 32.8 | if Nano misses too much at distance |
+
+Upgrades if quality demands them, in order of effort:
+
+1. **Fine-tune YOLOX** in Meganeura on egocentric, low-light, near-greyscale
+   passthrough captures, possibly with fewer classes. The Quest cameras are
+   not the clean photos COCO was shot with (DinoVision saw the same domain
+   gap).
+2. **D-FINE-N / DEIM-D-FINE-N** (Apache, 42.8–43.0 AP at 7 GFLOPs@640),
+   which needs GridSample, TopK and GatherElements added to Meganeura.
+3. **More names** than COCO's 80 via Objects365-trained weights (365
+   classes), where an Apache release exists for the chosen architecture.
+
+**Licences.** Excluded: Ultralytics YOLOv8/11/26 (AGPL), YOLO-World (GPL),
+and DEIMv2 and other non-commercial weights. DINOv3 derivatives carry its
+licence (no military or weapons use); DINOv2 is Apache-2.0.
+
+**Optional extensions**, from the survey, if a mechanic beyond the core is
+wanted: RTMPose-t (Apache) for real body measurements; BlazeFace (Apache)
+for face boxes; PP-OCR mobile (Apache) for text reading; Silero VAD and
+Moonshine-tiny (MIT) for the response menu; SmolVLM2-256M (Apache, already
+in Meganeura) for scene descriptions.
 
 ## Frame budget at 24 Hz
 
 41.7 ms per perception frame, of which roughly 20 ms of GPU time is
-available to inference: the compositor and our HUD need the rest. Estimates
+available to inference; the compositor and our HUD need the rest. Estimates
 assume the ncnn-like rate of 0.1 GMAC/ms until the calibration benchmark
 replaces it.
 
-| Slot | Model | Cadence | Est. GPU ms per frame |
+| Slot | Work | Cadence | Est. GPU ms |
 |---|---|---|---|
-| Preprocess | YUV→RGB, resize, normalise (compute shader) | every frame | ~1 |
-| Detection | D-FINE-N @512×384 (YOLOX-Nano @416×320 during bring-up) | every frame | ~5–17 before Adreno tuning |
-| Pose | RTMPose-t, up to 2 crops | every 2nd | ~2 |
-| Face | BlazeFace on head crops | every 4th | <0.5 |
-| Tracking, NMS, decode | CPU | every frame | 0 (CPU <1 ms) |
+| Preprocess | YUV→RGB, resize, Focus slicing (compute shader) | every frame | ~1 |
+| Detection | YOLOX-Nano @416×320 (Tiny: ~25 before tuning) | every frame | ~4 |
+| Decode, NMS, tracking | CPU | every frame | 0 (CPU <1 ms) |
 | Depth | Depth API | every frame | 0 |
-| Identify / OCR / VLM | on demand | bursts | displaces pose and face while running |
+
+That leaves headroom for YOLOX-Tiny once the Adreno kernels improve, or for
+one optional extension on a staggered cadence.
 
 ## Risks and open questions
 
@@ -244,17 +273,18 @@ replaces it.
 ## Milestones
 
 - **M0 (done)**: project skeleton; grade with presets, shared by WGSL and the
-  LUT; headless preview; tracker and text effects; XR crate type-checks.
+  LUT; headless preview; tracker, COCO labels and text effects; XR crate
+  type-checks.
 - **M1**: on device, the left camera graded through `GradePass` to both eyes.
   Plus the calibration benchmark and Quest 3 device facts (Meganeura items
   1–2).
-- **M2**: the Blade change for passthrough and alpha layers; the world view via
-  the colour map; HUD text (SDF atlas, typewriter, scroll), data scroll, boot,
-  damage, compass. In parallel in Meganeura: vision ops and ONNX coverage
-  (items 3–4).
-- **M3**: YOLOX-Nano bring-up (GPU preprocessing, CPU NMS, world-space
-  tracking with depth, target lock), then D-FINE-N once its ops land. Adreno
-  kernel work (item 5) is driven by the benchmark.
-- **M4**: pose and depth to size assessment and MATCH; face inset; object ID
-  via crop classification.
-- **M5**: response menu (VAD, speech-to-text), OCR, threat assessment.
+- **M2**: the detector. YOLOX-Nano as a Meganeura graph with official weights,
+  checked against onnxruntime on the host. GPU preprocessing, CPU decode and
+  NMS, tracking. Debug boxes with class names on the graded view.
+- **M3**: the Blade XR work (layers, passthrough with the colour map,
+  environment depth, past poses); world-space targets; HUD text (SDF atlas,
+  typewriter, scroll); target lock, object ID, data scroll, boot, damage.
+- **M4**: the rest of the core mechanics: acquisition inset, size
+  assessment, threat assessment, compass. Adreno kernel work driven by the
+  benchmark; a YOLOX fine-tune on passthrough captures if needed.
+- **Later**: optional extensions (speech, OCR, pose) and the D-FINE upgrade.

@@ -496,11 +496,11 @@ impl PassthroughCamera {
                     // int32[n * 4]: format, width, height, is-input.
                     let values =
                         std::slice::from_raw_parts(entry.data as *const i32, entry.count as usize);
-                    supported = values.chunks_exact(4).any(|c| {
-                        c[0] == AIMAGE_FORMAT_YUV_420_888
-                            && c[1] == capture.0
-                            && c[2] == capture.1
-                            && c[3] == 0
+                    let (configs, _) = values.as_chunks::<4>();
+                    supported = configs.iter().any(|&[format, width, height, is_input]| {
+                        format == AIMAGE_FORMAT_YUV_420_888
+                            && (width, height) == capture
+                            && is_input == 0
                     });
                 }
                 ACameraMetadata_free(md);

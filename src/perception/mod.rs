@@ -5,13 +5,19 @@
 //! the most recent one and interpolates; nothing on the display path waits
 //! for a network.
 //!
-//! Models are scheduled, not all run every frame. See `docs/technology.md`,
-//! "Frame budget".
+//! The core is a single object detector: every frame it yields boxes with
+//! a [`labels::Label`] (a COCO class name) and a score. Tracking turns those
+//! into persistent targets. Depth comes from the platform, not a model.
+//! Anything further (pose, OCR, speech) is an optional extension, scheduled
+//! around the detector. See `docs/technology.md`, "Model plan".
 //!
 //! All coordinates are normalised image coordinates of the source camera
 //! frame: `x` right and `y` down, both in `0..=1`.
 
+pub mod labels;
 pub mod track;
+
+pub use labels::{Category, Label};
 
 /// An axis-aligned box in normalised image coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,44 +79,19 @@ impl Rect {
     }
 }
 
-/// The object classes the HUD has behaviour for. Detectors map their own
-/// label space onto this; anything else is [`Class::Other`] with the
-/// detector's raw label index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Class {
-    Person,
-    Face,
-    Car,
-    Truck,
-    Bus,
-    Motorcycle,
-    Bicycle,
-    Animal,
-    Other(u16),
-}
-
-impl Class {
-    pub fn is_vehicle(self) -> bool {
-        matches!(
-            self,
-            Class::Car | Class::Truck | Class::Bus | Class::Motorcycle | Class::Bicycle
-        )
-    }
-}
-
 /// One detector output.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Detection {
     pub rect: Rect,
-    pub class: Class,
+    pub label: Label,
     /// Confidence, `0..=1`.
     pub score: f32,
 }
 
-/// 2D body keypoints in COCO-17 order, each `[x, y, confidence]`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Pose {
-    pub keypoints: [[f32; 3]; 17],
+/// Turns a camera frame into detections. Implemented by Meganeura-backed
+/// models; the trait keeps the tracker and HUD testable without a GPU.
+pub trait Detector {
+    fn detect(&mut self, frame: &crate::frame::Frame) -> Vec<Detection>;
 }
 
 /// Everything perception knows at one instant.
@@ -119,6 +100,4 @@ pub struct Observation {
     /// Capture time of the frame this was computed from, nanoseconds.
     pub timestamp_ns: i64,
     pub tracks: Vec<track::Track>,
-    /// Per-track poses, when the pose model ran on this frame.
-    pub poses: Vec<(track::TrackId, Pose)>,
 }

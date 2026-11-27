@@ -107,6 +107,77 @@ const AMEDIA_OK: c_int = 0;
 /// rather than by what they are called.
 const ACAMERA_LENS_FACING: u32 = (8 << 16) + 5;
 const ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS: u32 = (13 << 16) + 10;
+const ACAMERA_LENS_POSE_ROTATION: u32 = (8 << 16) + 6;
+const ACAMERA_LENS_POSE_TRANSLATION: u32 = (8 << 16) + 7;
+const ACAMERA_LENS_INTRINSIC_CALIBRATION: u32 = (8 << 16) + 10;
+const ACAMERA_LENS_POSE_REFERENCE: u32 = (8 << 16) + 12;
+const ACAMERA_LENS_DISTORTION: u32 = (8 << 16) + 13;
+const ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE: u32 = 15 << 16;
+const ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE: u32 = (15 << 16) + 10;
+
+/// The camera's optics and its place on the headset, from the standard
+/// Camera2 characteristics, where Horizon OS fills them. Each is `None`
+/// when the camera does not report it.
+#[derive(Clone, Debug, Default)]
+pub struct Calibration {
+    /// `fx, fy, cx, cy, skew`, in pixels of the pre-correction active array.
+    pub intrinsics: Option<[f32; 5]>,
+    /// Radial `k1..k3` and tangential `p1, p2`.
+    pub distortion: Option<[f32; 5]>,
+    /// The lens's orientation, a quaternion `x, y, z, w`, relative to
+    /// `pose_reference`.
+    pub rotation: Option<[f32; 4]>,
+    /// The lens's position in metres, relative to `pose_reference`.
+    pub translation: Option<[f32; 3]>,
+    /// `LENS_POSE_REFERENCE`: 0 primary camera, 1 gyroscope, 2 undefined,
+    /// 3 automotive.
+    pub pose_reference: Option<u8>,
+    /// `left, top, width, height` of the active array.
+    pub active_array: Option<[i32; 4]>,
+    /// The same before distortion correction, which the intrinsics use.
+    pub pre_correction_array: Option<[i32; 4]>,
+}
+
+impl Calibration {
+    /// Read what `md` reports.
+    unsafe fn read(md: *const ACameraMetadata) -> Self {
+        unsafe fn values<T: Copy, const N: usize>(
+            md: *const ACameraMetadata,
+            tag: u32,
+        ) -> Option<[T; N]> {
+            unsafe {
+                let mut entry = ACameraMetadataConstEntry {
+                    tag: 0,
+                    kind: 0,
+                    count: 0,
+                    data: std::ptr::null(),
+                };
+                if ACameraMetadata_getConstEntry(md, tag, &mut entry) != ACAMERA_OK
+                    || entry.data.is_null()
+                    || (entry.count as usize) < N
+                {
+                    return None;
+                }
+                let data = std::slice::from_raw_parts(entry.data as *const T, N);
+                Some(std::array::from_fn(|i| data[i]))
+            }
+        }
+        unsafe {
+            Self {
+                intrinsics: values(md, ACAMERA_LENS_INTRINSIC_CALIBRATION),
+                distortion: values(md, ACAMERA_LENS_DISTORTION),
+                rotation: values(md, ACAMERA_LENS_POSE_ROTATION),
+                translation: values(md, ACAMERA_LENS_POSE_TRANSLATION),
+                pose_reference: values::<u8, 1>(md, ACAMERA_LENS_POSE_REFERENCE).map(|[r]| r),
+                active_array: values(md, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+                pre_correction_array: values(
+                    md,
+                    ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                ),
+            }
+        }
+    }
+}
 
 /// The passthrough cameras look outward at the world, so they report
 /// `LENS_FACING_BACK`. The Quest also exposes a front-facing camera —
@@ -280,6 +351,8 @@ pub struct PassthroughCamera {
     reader: *mut AImageReader,
     frame: Frame,
     have_frame: bool,
+    /// The open camera's optics and pose, as far as it reports them.
+    calibration: Calibration,
     /// Kept so the camera can be reopened after the device errors.
     eye: Eye,
     capture: (i32, i32),
@@ -291,6 +364,11 @@ pub struct PassthroughCamera {
 unsafe impl Send for PassthroughCamera {}
 
 impl PassthroughCamera {
+    /// The open camera's optics and pose.
+    pub fn calibration(&self) -> &Calibration {
+        &self.calibration
+    }
+
     /// Open the passthrough camera for one eye.
     ///
     /// `capture` is the sensor resolution to request — 1280×960 is what the
@@ -348,10 +426,17 @@ impl PassthroughCamera {
             // beats predicting.
             let mut device: *mut ACameraDevice = std::ptr::null_mut();
             let mut last = ACAMERA_OK;
+            let mut calibration = Calibration::default();
             for &id in &candidates {
                 let status = ACameraManager_openCamera(manager, id, &mut callbacks, &mut device);
                 if status == ACAMERA_OK && !device.is_null() {
                     log::info!("opened camera {:?}", std::ffi::CStr::from_ptr(id));
+                    let mut md: *mut ACameraMetadata = std::ptr::null_mut();
+                    if ACameraManager_getCameraCharacteristics(manager, id, &mut md) == ACAMERA_OK {
+                        calibration = Calibration::read(md);
+                        ACameraMetadata_free(md);
+                    }
+                    log::info!("camera calibration: {calibration:?}");
                     break;
                 }
                 log::warn!(
@@ -422,6 +507,7 @@ impl PassthroughCamera {
                 capture.1
             );
             Ok(Self {
+                calibration,
                 manager,
                 device,
                 session,

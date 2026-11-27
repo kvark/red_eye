@@ -13,7 +13,11 @@ but other sessions are working on them.
 
 ## 1. Passthrough overlay: the compositor draws the red world
 
-**Status: blocked** (Blade: composition layers, passthrough style).
+**Status: done** (Blade #428). The app shows the system's passthrough
+graded by the colour map, with our layer alpha-blended over it, and falls
+back to drawing the camera itself without `XR_FB_passthrough`. Still to
+judge with someone wearing it: whether the colour map wants linear or
+sRGB values (`/data/local/tmp/red_eye/lut_linear` switches).
 
 The system's own passthrough, graded by the 256-entry colour map that
 `Grade::mono_to_rgba_lut` already produces, is stereo-correct, at display

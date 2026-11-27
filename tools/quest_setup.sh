@@ -43,7 +43,8 @@ adb logcat -G 16M
 
 if adb shell pm list packages | grep -q 'rust.red_eye_xr'; then
     adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
-    echo "granted HEADSET_CAMERA to rust.red_eye_xr"
+    adb shell pm grant rust.red_eye_xr com.oculus.permission.USE_SCENE
+    echo "granted HEADSET_CAMERA and USE_SCENE (the headset's depth) to rust.red_eye_xr"
 fi
 
 if [ "$wifi" = 1 ]; then

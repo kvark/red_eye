@@ -67,6 +67,7 @@ adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.on
 adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat   # builds, installs, starts
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA     # after each fresh install
+adb shell pm grant rust.red_eye_xr com.oculus.permission.USE_SCENE         # the headset's depth
 adb shell am force-stop rust.red_eye_xr
 adb shell am start -n rust.red_eye_xr/android.app.NativeActivity            # restart with the camera
 adb logcat -v time | grep -E "red_eye|RustStdoutStderr"

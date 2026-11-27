@@ -16,13 +16,13 @@ members = ["android-xr"]
 # crates must resolve to the *same* blade-graphics so the
 # `Arc<blade_graphics::Context>` the renderer creates is the type
 # meganeura's `SessionConfig::gpu` accepts. Bump both pins together.
-blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
-meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "b25f76344fc1d57235a1e2fb847fce3f3c193391", default-features = false }
+blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
+meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "63d6758406f3ca3797bce3f9ec606f6e1dbcc3f1", default-features = false }
 # The HUD: egui owns fonts and layout, blade-egui paints it, and blade-util's
 # buffer belt feeds the text grid. Same Blade revision as blade-graphics, and
 # the egui version blade-egui is built against.
-blade-egui = { version = "0.9", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
-blade-util = { version = "0.5", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
+blade-egui = { version = "0.9", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
+blade-util = { version = "0.5", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
 egui = { version = "0.34", features = ["bytemuck"] }
 blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
@@ -54,3 +54,4 @@ path = "examples/onnx_check.rs"
 [[example]]
 name = "hud"
 path = "examples/hud.rs"
+

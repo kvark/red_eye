@@ -208,10 +208,10 @@ dependencies = [
 [[package]]
 name = "blade-egui"
 version = "0.9.0"
-source = "git+https://github.com/kvark/blade?rev=bba0edcf18cd8440564b73b6bbb06971ce5e6725#bba0edcf18cd8440564b73b6bbb06971ce5e6725"
+source = "git+https://github.com/kvark/blade?rev=7569282e1f06d34b44f2cdb030b72fc8ec56a417#7569282e1f06d34b44f2cdb030b72fc8ec56a417"
 dependencies = [
  "blade-graphics",
- "blade-macros 0.3.0 (git+https://github.com/kvark/blade?rev=bba0edcf18cd8440564b73b6bbb06971ce5e6725)",
+ "blade-macros 0.3.0 (git+https://github.com/kvark/blade?rev=7569282e1f06d34b44f2cdb030b72fc8ec56a417)",
  "blade-util",
  "bytemuck",
  "egui",
@@ -221,7 +221,7 @@ dependencies = [
 [[package]]
 name = "blade-graphics"
 version = "0.9.0"
-source = "git+https://github.com/kvark/blade?rev=bba0edcf18cd8440564b73b6bbb06971ce5e6725#bba0edcf18cd8440564b73b6bbb06971ce5e6725"
+source = "git+https://github.com/kvark/blade?rev=7569282e1f06d34b44f2cdb030b72fc8ec56a417#7569282e1f06d34b44f2cdb030b72fc8ec56a417"
 dependencies = [
  "ash",
  "ash-window",
@@ -252,6 +252,7 @@ dependencies = [
  "slab",
  "wasm-bindgen",
  "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -268,7 +269,7 @@ dependencies = [
 [[package]]
 name = "blade-macros"
 version = "0.3.0"
-source = "git+https://github.com/kvark/blade?rev=bba0edcf18cd8440564b73b6bbb06971ce5e6725#bba0edcf18cd8440564b73b6bbb06971ce5e6725"
+source = "git+https://github.com/kvark/blade?rev=7569282e1f06d34b44f2cdb030b72fc8ec56a417#7569282e1f06d34b44f2cdb030b72fc8ec56a417"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -278,7 +279,7 @@ dependencies = [
 [[package]]
 name = "blade-util"
 version = "0.5.0"
-source = "git+https://github.com/kvark/blade?rev=bba0edcf18cd8440564b73b6bbb06971ce5e6725#bba0edcf18cd8440564b73b6bbb06971ce5e6725"
+source = "git+https://github.com/kvark/blade?rev=7569282e1f06d34b44f2cdb030b72fc8ec56a417#7569282e1f06d34b44f2cdb030b72fc8ec56a417"
 dependencies = [
  "blade-graphics",
  "bytemuck",
@@ -1377,7 +1378,7 @@ dependencies = [
 [[package]]
 name = "meganeura"
 version = "0.3.0"
-source = "git+https://github.com/kvark/meganeura?rev=b25f76344fc1d57235a1e2fb847fce3f3c193391#b25f76344fc1d57235a1e2fb847fce3f3c193391"
+source = "git+https://github.com/kvark/meganeura?rev=63d6758406f3ca3797bce3f9ec606f6e1dbcc3f1#63d6758406f3ca3797bce3f9ec606f6e1dbcc3f1"
 dependencies = [
  "blade-graphics",
  "blade-macros 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",

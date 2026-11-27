@@ -39,7 +39,7 @@ use std::sync::Arc;
 /// `xr` stays `None` for headless work (tests, previews, benchmarks); the
 /// XR app fills it in and everything downstream is unchanged.
 pub fn init_context(
-    xr: Option<blade_graphics::XrDesc>,
+    xr: Option<blade_graphics::xr::Desc>,
 ) -> Result<Arc<blade_graphics::Context>, blade_graphics::NotSupportedError> {
     let context = unsafe {
         blade_graphics::Context::init(blade_graphics::ContextDesc {

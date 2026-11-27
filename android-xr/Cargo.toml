@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 red-eye = { path = ".." }
-blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "bba0edcf18cd8440564b73b6bbb06971ce5e6725" }
+blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
 openxr = "0.21"
 ndk-glue = "0.7"
 android_logger = "0.14"

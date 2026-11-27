@@ -92,12 +92,13 @@ checked before a decision depends on it.
 
 ## Stack: findings and required work
 
-### Blade (rev `bba0edc`)
+### Blade (rev `7569282`)
 
-Blade is also ours. Its XR path today submits one stereo projection layer
-per frame (`present_xr` → `frame_stream.end`). The environment blend mode is
-the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
-`context.xr_session()` exposes the session.
+Blade is also ours. The work items below landed in PR #428 (composition
+layers, passthrough, environment depth, past-time poses, the example) and
+PR #430 (timing), now pinned. Before them, the XR path submitted one stereo
+projection layer per frame (`present_xr` → `frame_stream.end`), in the first
+blend mode enumerated (OPAQUE on Quest) and without alpha flags.
 
 ### Blade work for RedEye
 
@@ -125,7 +126,7 @@ the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
    to the CPU time at submit: durations stay exact, start times are
    approximate. The Quest profile in Frame budget was taken with it.
 
-### Meganeura (rev `b25f763`, 0.3)
+### Meganeura (rev `63d6758`, 0.3)
 
 Meganeura is our crate. What follows is its state today. The gaps are
 work items for us, not constraints on RedEye; they are collected under
@@ -206,20 +207,20 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
    DinoVision's `android/`, timing conv, depthwise, matmul and attention
    archetypes and whole models, with thermal state recorded.
 3. **D-FINE's cost and import path** (all its ops now import):
-   - **Convolution throughput on Adreno: first step done** (PR #394, branch
-     `adreno-conv`). The shared-memory im2col tiles reached 17–137 GFLOP/s;
+   - **Convolution throughput on Adreno: first step done** (PR #394, merged). The shared-memory im2col tiles reached 17–137 GFLOP/s;
      a register-blocked direct kernel (16 channels × 4 pixels per thread,
      no workgroup memory) runs D-FINE-N's convolutions in 24 ms instead of
      71. The 1×1 convolutions under 1024 pixels then run on the register
-     product kernel (PR #396), 1.5–1.7× faster. Left: per-shape block
+     product kernel (PR #396, merged), 1.5–1.7× faster. Left: per-shape block
      tuning, f16 arithmetic, and the 3×3 and strided convolutions.
    - **Matmul throughput on Adreno: done for plain and batch-major f32
-     products** (PR #395, branch `adreno-matmul`, stacked on #394). A
+     products** (PR #395, merged). A
      register kernel (4 rows × vec4 per thread, threads over (row block,
      column) pairs) takes D-FINE's products from 21.6 to 5.1 ms. Products
      with fused epilogues or prologues, transposed operands, or N or K not
      a multiple of four keep the shared-memory tiles.
-   - **A real TopK kernel: done** (PR #397, branch `topk-kernel`).
+   - **A real TopK kernel: done** (PR #397, in review; the pinned
+     Meganeura lacks it, so D-FINE's TopK still costs about 6 ms).
      `Graph::top_k_inner` selects and sorts in one dispatch: a radix
      select and bitonic sort per workgroup for long rows, a thread per
      row for short ones. D-FINE drops from 1,966 to 757 dispatches and

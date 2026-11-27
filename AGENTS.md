@@ -10,7 +10,8 @@ integration of both on a Quest.
 
 Read first: [docs/concept.md](docs/concept.md) (what we build: mechanics M1–M14)
 and [docs/technology.md](docs/technology.md) (how: architecture, model plan,
-frame budget, milestones, upstream work).
+frame budget, milestones, upstream work). [TASKS.md](TASKS.md) is the
+backlog of what to explore next, with each idea's status; keep it current.
 
 ## Layout
 

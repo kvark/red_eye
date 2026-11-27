@@ -42,12 +42,12 @@ convolution and 18% matmul, while all its TopK and other data-movement
 dispatches together take 10 ms.
 
 Register-blocked convolution and matmul kernels in Meganeura (PRs #394,
-#395) cut D-FINE to 61 ms of GPU time: the display holds about 55 Hz with
-detection at 10.6 Hz and 80–90 ms latency.
+#395, #396) cut D-FINE to 55 ms of GPU time: the display holds about
+60 Hz with detection at 11 Hz and about 80 ms latency.
 
 Next:
-- Meganeura: convolutions are again the largest family (27 of 61 ms);
-  split-K for the deep 1×1 ones at 15×20, and f16 arithmetic.
+- Meganeura: convolutions are still the largest family (24 of 55 ms);
+  per-shape tuning of the register blocks, and f16 arithmetic.
 - 1,800 small data-movement, pointwise and reduction dispatches take
   about 27 ms together: fusion and the TopK kernel.
 - Meanwhile, ship YOLOX-Nano on the device, or cap D-FINE's rate.

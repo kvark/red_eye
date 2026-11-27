@@ -197,8 +197,9 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      `adreno-conv`). The shared-memory im2col tiles reached 17–137 GFLOP/s;
      a register-blocked direct kernel (16 channels × 4 pixels per thread,
      no workgroup memory) runs D-FINE-N's convolutions in 24 ms instead of
-     71. Left: split-K for the deep 1×1 convolutions at 15×20 (about
-     150 GFLOP/s), per-shape block tuning, and f16 arithmetic.
+     71. The 1×1 convolutions under 1024 pixels then run on the register
+     product kernel (PR #396), 1.5–1.7× faster. Left: per-shape block
+     tuning, f16 arithmetic, and the 3×3 and strided convolutions.
    - **Matmul throughput on Adreno: done for plain and batch-major f32
      products** (PR #395, branch `adreno-matmul`, stacked on #394). A
      register kernel (4 rows × vec4 per thread, threads over (row block,
@@ -433,20 +434,21 @@ November 2026). The display runs at 72 Hz.
 | D-FINE-N, 64 chunks | 38–40 Hz | 6.5 Hz | 140–150 ms | |
 | D-FINE-N, 2 chunks, register-blocked convolutions | 51 Hz | 9.6 Hz | 95–99 ms | 75 ms |
 | D-FINE-N, also register-tiled products | 54–56 Hz | 10.6 Hz | 80–90 ms | 61 ms |
+| D-FINE-N, also small 1×1 convolutions as products | 58–62 Hz | 10.6–11.1 Hz | 79–86 ms | 55 ms |
 
 D-FINE's GPU time by kernel family (Meganeura's profiler, about 1967
 dispatches), at Meganeura `b25f763`, then with the register-blocked
 convolution kernel (PR #394), then also with register-tiled products
-(PR #395):
+(PR #395), then small 1×1 convolutions on the product kernel (PR #396):
 
-| Family | Dispatches | `b25f763` | #394 | #395 |
-|---|---|---|---|---|
-| convolution (`Conv2dGemm*`) | 81 | 70.9 ms | 24.1 ms | 27.2 ms |
-| matmul | 64 → 70 | 20.6 ms | 21.6 ms | 5.1 ms |
-| data movement | 841 | 10.4 ms | 10.5 ms | 11.1 ms |
-| pointwise | 628 | 8.7 ms | 8.9 ms | 8.9 ms |
-| normalisation, reduction | 353 → 346 | 5.8 ms | 5.8 ms | 6.6 ms |
-| total | | 123 ms | 75 ms | 61 ms |
+| Family | Dispatches | `b25f763` | #394 | #395 | #396 |
+|---|---|---|---|---|---|
+| convolution (`Conv2dGemm*`) | 81 | 70.9 ms | 24.1 ms | 27.2 ms | 23.6 ms |
+| matmul | 64 → 70 | 20.6 ms | 21.6 ms | 5.1 ms | 5.0 ms |
+| data movement | 841 | 10.4 ms | 10.5 ms | 11.1 ms | 10.6 ms |
+| pointwise | 628 | 8.7 ms | 8.9 ms | 8.9 ms | 8.8 ms |
+| normalisation, reduction | 353 → 346 | 5.8 ms | 5.8 ms | 6.6 ms | 5.9 ms |
+| total | | 123 ms | 75 ms | 61 ms | 55 ms |
 
 Run-to-run variation is about 10% (convolutions are unchanged between
 #394 and #395). The products no longer pack horizontally or split K, so

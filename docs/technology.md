@@ -193,11 +193,16 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
    DinoVision's `android/`, timing conv, depthwise, matmul and attention
    archetypes and whole models, with thermal state recorded.
 3. **D-FINE's cost and import path** (all its ops now import):
-   - **Convolution throughput on Adreno.** Measured on the Quest (Frame
-     budget), D-FINE-N takes 123 ms of GPU time, 61% of it in 81
-     `Conv2dGemm*` dispatches and 18% in matmuls. That is a few percent of
-     the Adreno 740's f32 peak. Tiling for 64-wide subgroups and f16
-     arithmetic come first.
+   - **Convolution throughput on Adreno: first step done** (PR #394, branch
+     `adreno-conv`). The shared-memory im2col tiles reached 17–137 GFLOP/s;
+     a register-blocked direct kernel (16 channels × 4 pixels per thread,
+     no workgroup memory) runs D-FINE-N's convolutions in 24 ms instead of
+     71. Left: split-K for the deep 1×1 convolutions at 15×20 (about
+     150 GFLOP/s), per-shape block tuning, and f16 arithmetic.
+   - **Matmul throughput on Adreno.** Now D-FINE's largest family at
+     21.6 ms: its 300-query decoder products (`300×128×512`, batched
+     `8×300×16×300`) reach about 50 GFLOP/s. The same register-blocking
+     approach should apply.
    - **A real TopK kernel.** D-FINE selects 300 of 1500 anchors at
      640×480 (2000 at 640²); the current lowering takes one max-and-mask
      pass per element. A single-dispatch select (bitonic or radix) cuts
@@ -424,16 +429,19 @@ November 2026). The display runs at 72 Hz.
 | D-FINE-N @640×480, 2 submission chunks | 17–19 Hz | 7.5 Hz | 127–132 ms | 123 ms |
 | D-FINE-N, 24 chunks | 22–34 Hz | 7 Hz | 130–141 ms | |
 | D-FINE-N, 64 chunks | 38–40 Hz | 6.5 Hz | 140–150 ms | |
+| D-FINE-N, 2 chunks, register-blocked convolutions | 51 Hz | 9.6 Hz | 95–99 ms | 75 ms |
 
-D-FINE's GPU time by kernel family (Meganeura's profiler, 1967 dispatches):
+D-FINE's GPU time by kernel family (Meganeura's profiler, 1967
+dispatches), before and after the register-blocked convolution kernel
+(Meganeura PR #394):
 
-| Family | Dispatches | GPU ms | Share |
-|---|---|---|---|
-| convolution (`Conv2dGemm*`) | 81 | 70.9 | 61% |
-| matmul | 64 | 20.6 | 18% |
-| data movement | 841 | 10.4 | 9% |
-| pointwise | 628 | 8.7 | 8% |
-| normalisation, reduction | 353 | 5.8 | 5% |
+| Family | Dispatches | GPU ms | Share | After #394 |
+|---|---|---|---|---|
+| convolution (`Conv2dGemm*`) | 81 | 70.9 | 61% | 24.1 ms |
+| matmul | 64 | 20.6 | 18% | 21.6 ms |
+| data movement | 841 | 10.4 | 9% | 10.5 ms |
+| pointwise | 628 | 8.7 | 8% | 8.9 ms |
+| normalisation, reduction | 353 | 5.8 | 5% | 5.8 ms |
 
 D-FINE occupies the GPU so much of the time that the renderer misses
 frames; finer submission chunks let it interleave but slow inference.

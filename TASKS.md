@@ -41,9 +41,12 @@ per inference and drags the display to 17–19 Hz; 61% of that is
 convolution and 18% matmul, while all its TopK and other data-movement
 dispatches together take 10 ms.
 
+A register-blocked convolution kernel in Meganeura (PR #394) cut D-FINE
+to 75 ms of GPU time: the display holds 51 Hz with detection at 9.6 Hz.
+
 Next:
-- Meganeura: convolution and matmul throughput on Adreno (f16 arithmetic,
-  64-wide subgroups). This decides whether D-FINE is affordable.
+- Meganeura: matmul throughput on Adreno (now 22 ms of D-FINE's 75), then
+  split-K for the deep 1×1 convolutions and f16 arithmetic.
 - Meanwhile, ship YOLOX-Nano on the device, or cap D-FINE's rate.
 - Meganeura: a single-dispatch TopK kernel, after the convolutions.
 - A capture mode, as DinoVision has, and a fine-tune of the detector on

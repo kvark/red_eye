@@ -93,7 +93,7 @@ fn main() {
             &Grade::t2(),
             now,
             &[],
-            Some(&mut overlay),
+            &mut [&mut overlay],
         );
         let path = out_dir.join(format!("hud-{name}.png"));
         image::RgbaImage::from_raw(frame.width, frame.height, pixels)

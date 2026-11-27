@@ -71,8 +71,10 @@ RedEye side:
 
 **Status: idea.**
 
-Uses: T2's traced outlines around the subject (M6), the wireframe below
-(item 6), and size assessment (M5). Masking only the locked target keeps it
+Uses: T2's traced outlines around the subject (M6), the wireframe (item 6),
+and size assessment (M5). The wireframe shows whatever masks the network
+produces, so instance masks for everything and a mask only for the target
+both work. Masking only the locked target keeps it
 cheap: a box-prompted model on the target's crop, every few frames.
 
 Candidates (evaluate with `tools/onnx_reference.py` and
@@ -110,32 +112,29 @@ target.
 Uses: size assessment (M5), world-space targets and lock prediction (M3),
 and the wireframe.
 
-## 6. Character wireframe
+## 6. Wireframe: depth contours inside masks
 
-**Status: idea.** Needs a mask (item 4) and depth (item 5); pose for the
-last step.
+**Status: in progress.** The contour pass is built and tested on synthetic
+depth and masks. It needs a real mask source (item 4) and depth (item 5).
 
-The films trace subject outlines and, in T2, draw a triangulated mesh in
-the smile analysis. The T2 script asks for an outlined body in the bar scene
-(not confirmed in the cut). A wireframe that follows the person's shape fits
-that grammar. Steps, each convincing on its own:
+Decision: lines of constant depth inside every mask the segmentation
+network produces, whatever its classes, plus the mask outline. There is no
+split into body parts and no lifted 3D mesh. The films trace subject
+outlines, and T2 draws a triangulated mesh in the smile analysis. Contours
+that wrap around a shape read the same way, and they tolerate coarse depth,
+because the lines come from interpolated values.
 
-1. **Grid in the silhouette** (no depth): a screen-space grid clipped to the
-   mask, plus the outline. Possible as soon as item 4 exists.
-2. **Depth contours**: lines of constant depth inside the mask, from one
-   shader (`fract(depth / spacing)`). They wrap around the body like a
-   topographic scan, and they tolerate coarse depth, because the lines come
-   from interpolated values.
-3. **Mesh wireframe**: a grid over the target's box, each vertex lifted to 3D
-   with its depth and drawn in perspective. Cells outside the mask or across
-   depth jumps are dropped, and a scan sweep animates it in.
-4. **Body parts**: pose keypoints (RTMPose, Apache-2.0) split the body into
-   torso and limbs. Each part gets rings fitted to the mask's width and to
-   depth, so the wireframe sits on specific parts: the clothing-match look,
-   highlighting the parts being "measured".
-
-Cost: the mask on the target's crop every 2–4 frames; depth free (Depth API)
-or one small crop model; the wireframe is one draw.
+- `render::WireframePass`, implemented as one fragment pass over the camera
+  image's placement:
+  - An instance-id mask and a float depth map, both in camera-image
+    coordinates at any resolution.
+  - Contour lines from `fract(depth / spacing)`, antialiased with screen-space
+    derivatives.
+  - The outline where the instance id changes, and a faint fill.
+  - One highlighted instance (the locked target) brighter than the rest.
+  - A phase that makes the contours drift, for a scanning look.
+- Next: feed it from the chosen segmentation and depth models, and show it
+  in `examples/hud.rs` and the XR app.
 
 ## 7. HUD mechanics
 

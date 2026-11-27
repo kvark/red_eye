@@ -20,12 +20,13 @@ backlog of what to explore next, with each idea's status; keep it current.
 | `src/frame.rs` | Camera frame: I420, as Camera2 delivers it |
 | `src/source.rs` | `FrameSource`; test pattern and still image |
 | `src/grade.rs` | Red grade (presets, LUT for `XR_FB_passthrough`) |
-| `src/render.rs`, `src/shaders/` | Blade passes; WGSL lives in `.wgsl` files |
+| `src/render.rs`, `src/shaders/` | Blade passes (grade, boxes, depth-contour wireframe), offscreen rendering with overlays; WGSL lives in `.wgsl` files |
 | `src/perception/` | `Detector` trait, COCO labels, NMS, tracking, the `Observation` the HUD reads |
 | `src/perception/yolox.rs` | YOLOX network (hand-built Meganeura graph), decode |
 | `src/perception/dfine.rs` | D-FINE through Meganeura's ONNX importer, decode |
 | `src/perception/preprocess.rs` | Each model's `InputSpec`; GPU preprocessing into the session's input buffer, and its CPU reference |
 | `src/perception/worker.rs` | Detector thread: drops frames while busy, publishes observations |
+| `src/perception/dense.rs` | Per-pixel results in camera-image coordinates: instance masks, depth |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `src/hud/canvas.rs` | egui laid out once per frame into an offscreen texture, composited per eye |
 | `src/hud/grid.rs` | Monospace text as one quad batch, copied from Starcom (keep close to it) |

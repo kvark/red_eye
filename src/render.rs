@@ -217,6 +217,273 @@ impl GradePass {
     }
 }
 
+/// How the wireframe looks; see [`WireframePass`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WireframeStyle {
+    /// Display-referred colour and overall opacity.
+    pub color: [f32; 4],
+    /// Depth units between contour lines.
+    pub spacing: f32,
+    /// Contour line width, in target pixels.
+    pub line_px: f32,
+    /// Offset of the contours, in fractions of `spacing`; animate it for a
+    /// scanning drift.
+    pub phase: f32,
+    /// Instance drawn at full strength, 0 for none.
+    pub highlight: u8,
+    /// Alpha of the fill inside masks.
+    pub fill: f32,
+    /// How much fainter instances other than `highlight` are.
+    pub dim: f32,
+}
+
+impl Default for WireframeStyle {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 1.0, 1.0, 0.85],
+            spacing: 0.1,
+            line_px: 1.5,
+            phase: 0.0,
+            highlight: 0,
+            fill: 0.06,
+            dim: 0.35,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct WireframeParams {
+    placement: [f32; 4],
+    color: [f32; 4],
+    contour: [f32; 4],
+    style: [f32; 4],
+}
+
+#[derive(blade_macros::ShaderData)]
+struct WireframeData {
+    params: WireframeParams,
+    mask_texture: gpu::TextureView,
+    depth_texture: gpu::TextureView,
+}
+
+/// A texture filled from the CPU through its own staging buffer.
+struct Plane {
+    texture: gpu::Texture,
+    view: gpu::TextureView,
+    staging: gpu::Buffer,
+    size: [u32; 2],
+    format: gpu::TextureFormat,
+    texel_bytes: u32,
+    initialized: bool,
+}
+
+impl Plane {
+    fn new(context: &gpu::Context, name: &str, format: gpu::TextureFormat, size: [u32; 2]) -> Self {
+        let texel_bytes = format.block_info().size as u32;
+        let texture = context.create_texture(gpu::TextureDesc {
+            name,
+            format,
+            size: gpu::Extent {
+                width: size[0],
+                height: size[1],
+                depth: 1,
+            },
+            dimension: gpu::TextureDimension::D2,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            usage: gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
+            sample_count: 1,
+            external: None,
+        });
+        let view = context.create_texture_view(
+            texture,
+            gpu::TextureViewDesc {
+                name,
+                format,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        let staging = context.create_buffer(gpu::BufferDesc {
+            name,
+            size: (size[0] * size[1] * texel_bytes) as u64,
+            memory: gpu::Memory::Upload,
+        });
+        Self {
+            texture,
+            view,
+            staging,
+            size,
+            format,
+            texel_bytes,
+            initialized: false,
+        }
+    }
+
+    /// Record an upload of `bytes`, a `size` grid, recreating the texture
+    /// when the size changes. One upload may be in flight at a time.
+    fn upload(
+        &mut self,
+        context: &gpu::Context,
+        encoder: &mut gpu::CommandEncoder,
+        name: &str,
+        size: [u32; 2],
+        bytes: &[u8],
+    ) {
+        if size != self.size {
+            let fresh = Self::new(context, name, self.format, size);
+            std::mem::replace(self, fresh).destroy(context);
+        }
+        assert_eq!(bytes.len(), (size[0] * size[1] * self.texel_bytes) as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.staging.data(), bytes.len());
+        }
+        context.sync_buffer(
+            self.staging.into(),
+            bytes.len() as u64,
+            gpu::BufferTarget::Data,
+        );
+        if !self.initialized {
+            encoder.init_texture(self.texture);
+            self.initialized = true;
+        }
+        let mut transfer = encoder.transfer(name);
+        transfer.copy_buffer_to_texture(
+            self.staging.at(0),
+            size[0] * self.texel_bytes,
+            self.texture.into(),
+            gpu::Extent {
+                width: size[0],
+                height: size[1],
+                depth: 1,
+            },
+        );
+    }
+
+    fn destroy(self, context: &gpu::Context) {
+        context.destroy_buffer(self.staging);
+        context.destroy_texture_view(self.view);
+        context.destroy_texture(self.texture);
+    }
+}
+
+/// The HUD's wireframe: lines of constant depth inside segmentation masks,
+/// with each mask's outline and a faint fill. Masks and depth are
+/// [`crate::perception::dense`] grids spanning the camera image, so this is
+/// placed exactly like [`GradePass`]. Contours come from interpolated depth,
+/// so coarse depth still draws smooth lines that wrap around the shape.
+pub struct WireframePass {
+    pipeline: gpu::RenderPipeline,
+    mask: Plane,
+    depth: Plane,
+}
+
+impl WireframePass {
+    pub fn new(context: &gpu::Context, color_format: gpu::TextureFormat) -> Self {
+        let shader = context.create_shader(gpu::ShaderDesc {
+            source: include_str!("shaders/wireframe.wgsl"),
+            naga_module: None,
+        });
+        let layout = <WireframeData as gpu::ShaderData>::layout();
+        let pipeline = context.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "wireframe",
+            data_layouts: &[&layout],
+            vertex: shader.at("vs_main"),
+            vertex_fetches: &[],
+            primitive: gpu::PrimitiveState::default(),
+            depth_stencil: None,
+            fragment: Some(shader.at("fs_main")),
+            color_targets: &[gpu::ColorTargetState {
+                format: color_format,
+                blend: Some(gpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+        Self {
+            pipeline,
+            mask: Plane::new(
+                context,
+                "wireframe-mask",
+                gpu::TextureFormat::R8Unorm,
+                [1, 1],
+            ),
+            depth: Plane::new(
+                context,
+                "wireframe-depth",
+                gpu::TextureFormat::R32Float,
+                [1, 1],
+            ),
+        }
+    }
+
+    /// Record uploads of the latest mask and depth. The staging buffers are
+    /// reused, so call once the previous submission that read them is done.
+    pub fn upload(
+        &mut self,
+        context: &gpu::Context,
+        encoder: &mut gpu::CommandEncoder,
+        mask: &crate::perception::dense::Mask,
+        depth: &crate::perception::dense::DepthMap,
+    ) {
+        self.mask.upload(
+            context,
+            encoder,
+            "wireframe-mask",
+            [mask.width, mask.height],
+            &mask.ids,
+        );
+        self.depth.upload(
+            context,
+            encoder,
+            "wireframe-depth",
+            [depth.width, depth.height],
+            bytemuck::cast_slice(&depth.values),
+        );
+    }
+
+    pub fn draw(
+        &self,
+        pass: &mut gpu::RenderCommandEncoder,
+        placement: Placement,
+        style: &WireframeStyle,
+        linear_target: bool,
+    ) {
+        let mut pc = pass.with(&self.pipeline);
+        pc.bind(
+            0,
+            &WireframeData {
+                params: WireframeParams {
+                    placement: placement.transform,
+                    color: style.color,
+                    contour: [
+                        style.spacing.max(1e-6),
+                        style.line_px,
+                        style.phase,
+                        f32::from(style.highlight),
+                    ],
+                    style: [
+                        style.fill,
+                        style.dim,
+                        if linear_target { 1.0 } else { 0.0 },
+                        0.0,
+                    ],
+                },
+                mask_texture: self.mask.view,
+                depth_texture: self.depth.view,
+            },
+        );
+        pc.draw(0, 3, 0, 1);
+    }
+
+    pub fn destroy(mut self, context: &gpu::Context) {
+        context.destroy_render_pipeline(&mut self.pipeline);
+        self.mask.destroy(context);
+        self.depth.destroy(context);
+    }
+}
+
 /// One box outline: `rect` is `[min x, min y, max x, max y]` in normalised
 /// image coordinates (y down), as perception reports them.
 #[repr(C)]
@@ -352,7 +619,7 @@ pub fn render_graded(
     time: f32,
     boxes: &[BoxInstance],
 ) -> Vec<u8> {
-    render_offscreen(context, frame, grade, time, boxes, None)
+    render_offscreen(context, frame, grade, time, boxes, &mut [])
 }
 
 /// Something drawn over the graded frame, such as the HUD, which records
@@ -367,14 +634,14 @@ pub trait Overlay {
     fn submitted(&mut self, sync_point: &gpu::SyncPoint);
 }
 
-/// [`render_graded`] with an [`Overlay`] drawn last.
+/// [`render_graded`] with [`Overlay`]s drawn over it, in order.
 pub fn render_offscreen(
     context: &gpu::Context,
     frame: &Frame,
     grade: &Grade,
     time: f32,
     boxes: &[BoxInstance],
-    mut overlay: Option<&mut dyn Overlay>,
+    overlays: &mut [&mut dyn Overlay],
 ) -> Vec<u8> {
     let size = gpu::Extent {
         width: frame.width,
@@ -420,7 +687,7 @@ pub fn render_offscreen(
     encoder.start();
     encoder.init_texture(target);
     pass.upload(context, &mut encoder, frame);
-    if let Some(overlay) = overlay.as_mut() {
+    for overlay in overlays.iter_mut() {
         overlay.prepare(context, &mut encoder);
     }
     {
@@ -444,7 +711,7 @@ pub fn render_offscreen(
             [size.width, size.height],
             thickness,
         );
-        if let Some(overlay) = overlay.as_ref() {
+        for overlay in overlays.iter() {
             overlay.draw(&mut rp, Placement::FULLSCREEN, false);
         }
     }
@@ -453,7 +720,7 @@ pub fn render_offscreen(
         transfer.copy_texture_to_buffer(target.into(), readback.into(), size.width * 4, size);
     }
     let sync = context.submit(&mut encoder);
-    if let Some(overlay) = overlay {
+    for overlay in overlays.iter_mut() {
         overlay.submitted(&sync);
     }
     let finished = context.wait_for(&sync, 30_000).unwrap_or(false);
@@ -473,4 +740,30 @@ pub fn render_offscreen(
     context.destroy_texture_view(view);
     context.destroy_texture(target);
     pixels
+}
+
+/// One wireframe frame as an [`Overlay`]: uploads `mask` and `depth`, then
+/// draws them.
+pub struct WireframeOverlay<'a> {
+    pub pass: &'a mut WireframePass,
+    pub mask: &'a crate::perception::dense::Mask,
+    pub depth: &'a crate::perception::dense::DepthMap,
+    pub style: WireframeStyle,
+}
+
+impl Overlay for WireframeOverlay<'_> {
+    fn prepare(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder) {
+        self.pass.upload(context, encoder, self.mask, self.depth);
+    }
+
+    fn draw(
+        &self,
+        pass: &mut gpu::RenderCommandEncoder,
+        placement: Placement,
+        linear_target: bool,
+    ) {
+        self.pass.draw(pass, placement, &self.style, linear_target);
+    }
+
+    fn submitted(&mut self, _sync_point: &gpu::SyncPoint) {}
 }

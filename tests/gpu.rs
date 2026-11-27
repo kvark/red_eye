@@ -171,7 +171,7 @@ fn hud_draws_match_and_brackets() {
             &Grade::t1(),
             0.0,
             &[],
-            Some(&mut overlay),
+            &mut [&mut overlay],
         )
     };
     let pixels = render(&mut hud, &mut canvas);
@@ -199,4 +199,78 @@ fn hud_draws_match_and_brackets() {
         0,
         "the HUD leaks into the middle"
     );
+}
+
+/// Depth contours stay inside the mask and wrap the shape: a dome of depth
+/// inside a disc mask draws rings, with gaps between them, an outline at
+/// the disc's edge, and nothing outside it.
+#[test]
+#[ignore = "requires a working GPU context"]
+fn wireframe_draws_contours_inside_the_mask() {
+    use red_eye::perception::dense::{DepthMap, Mask};
+    use red_eye::render::{WireframeOverlay, WireframePass, WireframeStyle};
+
+    let context = red_eye::init_context(None).expect("no GPU");
+    let (w, h) = (320u32, 320u32);
+    let frame = Frame::new(w, h, Eye::Left);
+    let inside = |u: f32, v: f32| (u - 0.5).powi(2) + (v - 0.5).powi(2) < 0.3f32.powi(2);
+    // Mask and depth at their own, coarser resolutions, as models give them.
+    let mut mask = Mask::new(80, 80);
+    mask.paint(1, inside);
+    let mut depth = DepthMap::new(40, 40);
+    depth.fill(|u, v| {
+        let r2 = (u - 0.5).powi(2) + (v - 0.5).powi(2);
+        2.0 - (0.35f32.powi(2) - r2).max(0.0).sqrt()
+    });
+    let mut pass = WireframePass::new(&context, blade_graphics::TextureFormat::Rgba8Unorm);
+    let mut overlay = WireframeOverlay {
+        pass: &mut pass,
+        mask: &mask,
+        depth: &depth,
+        style: WireframeStyle {
+            spacing: 0.02,
+            ..Default::default()
+        },
+    };
+    let pixels = red_eye::render::render_offscreen(
+        &context,
+        &frame,
+        &Grade::t1(),
+        0.0,
+        &[],
+        &mut [&mut overlay],
+    );
+    pass.destroy(&context);
+
+    let (mut lit, mut dark, mut outside_lit, mut edge_lit) = (0, 0, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let value = pixels[((y * w + x) * 4) as usize];
+            let r = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
+            if r > 0.32 {
+                outside_lit += (value > 30) as u32;
+            } else if r < 0.27 {
+                lit += (value > 150) as u32;
+                dark += (value < 40) as u32;
+            } else if (0.295..0.30).contains(&r) {
+                edge_lit += (value > 150) as u32;
+            }
+        }
+    }
+    assert_eq!(outside_lit, 0, "the wireframe leaks outside the mask");
+    assert!(lit > 500, "no contour lines inside: {lit}");
+    // Rings bunch up towards the dome's edge, so a fair share of the disc
+    // is lit; a fill would light all of it.
+    let lit_share = lit as f32 / (lit + dark) as f32;
+    assert!(
+        lit_share < 0.4,
+        "contours should be lines, not a fill: {lit_share}"
+    );
+    assert!(edge_lit > 20, "no outline: {edge_lit}");
+    // Separate rings: dark-to-lit crossings along the row through the centre.
+    let row = h / 2;
+    let at = |x: u32| pixels[((row * w + x) * 4) as usize];
+    let crossings = (1..w).filter(|&x| at(x - 1) < 100 && at(x) >= 100).count();
+    assert!(crossings >= 6, "too few rings crossed: {crossings}");
 }

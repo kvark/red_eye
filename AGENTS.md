@@ -12,6 +12,8 @@ Read first: [docs/concept.md](docs/concept.md) (what we build: mechanics M1–M1
 and [docs/technology.md](docs/technology.md) (how: architecture, model plan,
 frame budget, milestones, upstream work). [TASKS.md](TASKS.md) is the
 backlog of what to explore next, with each idea's status; keep it current.
+[HANDOFF.md](HANDOFF.md) is the guide for continuing on a machine with a
+Quest 3: setup, first run, what to measure.
 
 ## Layout
 

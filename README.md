@@ -13,6 +13,7 @@ Built on [Blade](https://github.com/kvark/blade) for GPU and OpenXR, and
 - [docs/technology.md](docs/technology.md): architecture, model plan, frame
   budget, milestones.
 - [TASKS.md](TASKS.md): what to explore next, and where each idea stands.
+- [HANDOFF.md](HANDOFF.md): continuing on a machine with a Quest 3.
 - [AGENTS.md](AGENTS.md): layout, commands and rules for contributors.
 
 ## Status

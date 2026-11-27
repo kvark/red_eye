@@ -174,6 +174,9 @@ struct App {
     tracks: Vec<Track>,
     last_target_poll: Instant,
     detect_hz: f32,
+    render_hz: f32,
+    /// Seconds of rates measured since the last log line.
+    reports: u32,
     detector: Option<Worker>,
     last_detect: Instant,
     shown_generation: u64,
@@ -208,6 +211,8 @@ impl App {
             tracks: Vec::new(),
             last_target_poll: Instant::now() - TARGET_POLL,
             detect_hz: 0.0,
+            render_hz: 0.0,
+            reports: 0,
             detector: spawn_detector(context),
             last_detect: Instant::now(),
             shown_generation: 0,
@@ -315,6 +320,7 @@ impl App {
         }
         // Lay out the HUD once; each eye composites it.
         let telemetry = Telemetry {
+            render_hz: self.render_hz,
             detect_hz: self.detect_hz,
             latency_ms: self.detect_latency_ms,
         };
@@ -362,16 +368,21 @@ impl App {
         self.last_submit = Some(sync);
         self.frames += 1;
 
-        if self.last_report.elapsed() >= Duration::from_secs(5) {
+        // Rates refresh every second for the HUD; the log gets every fifth.
+        if self.last_report.elapsed() >= Duration::from_secs(1) {
             let secs = self.last_report.elapsed().as_secs_f64();
+            self.render_hz = (self.frames as f64 / secs) as f32;
             self.detect_hz = (self.detections as f64 / secs) as f32;
-            info!(
-                "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | {:?}",
-                self.frames as f64 / secs,
-                self.detect_hz,
-                self.detect_latency_ms,
-                self.hud.targeting.phase(),
-            );
+            self.reports += 1;
+            if self.reports.is_multiple_of(5) {
+                info!(
+                    "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | {:?}",
+                    self.render_hz,
+                    self.detect_hz,
+                    self.detect_latency_ms,
+                    self.hud.targeting.phase(),
+                );
+            }
             self.frames = 0;
             self.detections = 0;
             self.last_report = Instant::now();

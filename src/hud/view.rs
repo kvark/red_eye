@@ -7,6 +7,8 @@
 //! - One large state word bottom-centre with a block cursor: "MATCH" once
 //!   the target is found, "SCANNING" while it is not.
 //! - Corner brackets around the matched object, with its class name.
+//! - With no target named, each confirmed track's class and confidence
+//!   above its outline, which the renderer draws.
 //!
 //! The canvas covers exactly the camera image, so normalised track
 //! rectangles map straight onto it. Positions and sizes are fractions of the
@@ -22,6 +24,8 @@ use crate::perception::track::Track;
 /// Telemetry the number blocks report alongside their filler.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Telemetry {
+    /// Display frames per second, as rendered.
+    pub render_hz: f32,
     pub detect_hz: f32,
     pub latency_ms: f32,
 }
@@ -155,7 +159,11 @@ impl Hud {
             DIM,
         );
         let lines = [
-            digits(1, 4, tick),
+            format!(
+                "FPS {:05.1} HZ  {}",
+                telemetry.render_hz,
+                digits(1, 1, tick)
+            ),
             format!(
                 "DET {:05.1} HZ  {}",
                 telemetry.detect_hz,
@@ -230,6 +238,15 @@ impl Hud {
             );
             // Each line starts once the one above has finished.
             elapsed -= l.chars().count() as f32 / typed.chars_per_second;
+        }
+
+        // Scanning everything: name each confirmed track over its outline.
+        if target.is_none() {
+            for t in &listed {
+                let corner = at(t.rect.min[0], t.rect.min[1]);
+                let label = format!("{} {:.2}", t.label.name().to_uppercase(), t.score);
+                text.write(ui, corner - vec2(0.0, row * 1.1), &label, TEXT);
+            }
         }
 
         // Brackets and a name around the matched object.

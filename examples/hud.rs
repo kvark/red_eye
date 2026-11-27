@@ -52,6 +52,8 @@ fn main() {
         tracker.update(&detector.detect(&frame));
     }
     let telemetry = Telemetry {
+        // Offline: no display rate to report.
+        render_hz: 0.0,
         detect_hz: 3.0 / start.elapsed().as_secs_f32(),
         latency_ms: start.elapsed().as_secs_f32() * 1e3 / 3.0,
     };

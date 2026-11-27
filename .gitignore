@@ -15,3 +15,6 @@
 /out
 __pycache__/
 *.py[cod]
+
+# Host Python tooling (tools/requirements.txt)
+/.venv

@@ -35,11 +35,17 @@ mono, narrower than passthrough, and competing with inference for the GPU.
 YOLOX-Nano (25.8 AP, hand-built graph) is the fallback. Both are COCO-80
 and Apache-2.0, and both match onnxruntime.
 
+Measured on a Quest 3S (technology.md, Frame budget): YOLOX-Nano runs at
+18–20 Hz with the display at 68–71 Hz. D-FINE-N takes 123 ms of GPU time
+per inference and drags the display to 17–19 Hz; 61% of that is
+convolution and 18% matmul, while all its TopK and other data-movement
+dispatches together take 10 ms.
+
 Next:
-- Run on a Quest: frame rate, latency and thermals with the XR app
-  (needs the headset).
-- Meganeura: a single-dispatch TopK kernel. D-FINE has 1967 dispatches,
-  most of them from TopK.
+- Meganeura: convolution and matmul throughput on Adreno (f16 arithmetic,
+  64-wide subgroups). This decides whether D-FINE is affordable.
+- Meanwhile, ship YOLOX-Nano on the device, or cap D-FINE's rate.
+- Meganeura: a single-dispatch TopK kernel, after the convolutions.
 - A capture mode, as DinoVision has, and a fine-tune of the detector on
   egocentric, low-light, near-greyscale passthrough frames.
 - D-FINE-S (48.5 AP) if the budget allows; Objects365 weights for more
@@ -177,11 +183,54 @@ because the lines come from interpolated values.
 
 ## 8. Platform
 
-- **First run on a Quest 3** (needs the headset): the graded camera,
-  detection and HUD, plus Meganeura's calibration benchmark and Quest 3
-  device facts (f16, coopmat, subgroups).
+- **First run: done** on a Quest 3S. The graded camera, detection and HUD
+  all work, and the device facts are in technology.md (f16 yes, coopmat
+  no). `tools/quest_setup.sh` prepares a connected headset for unattended
+  runs. Still to look at with someone wearing it: HUD legibility, colours,
+  and how the camera image lines up with the world.
+- Meganeura's calibration benchmark (ms/GMAC per kernel archetype), now
+  that GPU timing works on Adreno (Blade branch
+  `timing-without-calibration`).
 - Camera intrinsics and extrinsics: standard Camera2 tags, or a one-off
   calibration.
 - World-space targets: detections placed through depth and the head pose at
   capture time, so locks stay on people as the head moves.
 - Thermals: log them with timings, as DinoVision does.
+
+## 9. Stereo HUD: object overlays at the object's depth
+
+**Status: idea.** Builds on depth (item 5), world-space targets (item 8)
+and, to pay off fully, compositor passthrough (item 1).
+
+Today one HUD canvas is composited identically into both eyes, so every
+mark sits at the same apparent depth, wherever the object it describes is.
+Anything about an object can instead be drawn per eye at that object's
+depth, so it fuses onto the object in true stereo: the box and its label,
+the brackets and MATCH, the wireframe.
+
+- Split the HUD in two. Readouts (corner blocks, status stack, state word)
+  stay on the body-locked canvas 1.5–2 m away (concept.md, Comfort).
+  Object marks become world-space geometry, rendered with each eye's own
+  view and projection.
+- Placing an object: the ray through its box centre from the camera's
+  intrinsics and extrinsics (item 8), at a distance from the Quest Depth
+  API's median inside the box (or the mask), or failing that a class size
+  prior (a person is about 1.7 m tall). Monocular depth (DA-V2) gives shape,
+  not scale, so it rides on that distance.
+- The box becomes a quad facing the viewer at the object's distance, sized
+  from the box's angular extent; its label sits on the quad's edge in the
+  same plane, so text and object share one vergence.
+- The wireframe becomes a mesh: the contour pass's grid displaced by the
+  depth map, scaled to the object's distance, drawn per eye. The contours
+  then wrap around the object in depth, not only on the image.
+- Anchor marks in world space with the head pose at capture time, so they
+  stay on the object between detections and through capture latency
+  (technology.md, risk 4).
+- Why: placing marks at the object's depth avoids a vergence conflict
+  between them and the object, which is less tiring and reads as part of the
+  world instead of a sticker on the visor. Stereo marks over today's mono
+  camera image would disagree with the image itself, so measure with
+  compositor passthrough (item 1).
+- Check on the device: how stable the depth is frame to frame (jitter reads
+  as marks swimming), and whether placement error over a few metres is
+  tolerable.

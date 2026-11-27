@@ -12,11 +12,14 @@ checked before a decision depends on it.
 
 ## Platform: Quest 3
 
-- **SoC**: Snapdragon XR2 Gen 2, Adreno 740, Vulkan. Meganeura's Quest 3S
-  qualification found packed int-dot and 64-lane subgroups, but neither
-  native shader f16 nor cooperative matrices, so today everything runs on
-  scalar f32 kernels with f16 as storage only. Re-check on a Quest 3 with
-  current Horizon OS (Meganeura work, item 1).
+- **SoC**: Snapdragon XR2 Gen 2, Adreno 740, Vulkan 1.3. Queried on a
+  Quest 3S with Horizon OS 210 (driver `0x80345009`, November 2026):
+  `shaderFloat16` and `shaderInt8` (earlier drivers lacked f16
+  arithmetic), 16- and 8-bit storage, integer dot product, subgroups of 64
+  (64–128 with size control, full subgroups), f32 atomics. **No**
+  cooperative matrices, and **no** `VK_EXT_calibrated_timestamps`, which
+  Blade needed for any GPU timing (Blade work, item 6). 32 KiB shared
+  memory, 1024 invocations per workgroup. The Quest 3 has the same SoC.
 - **Passthrough Camera API** (Horizon OS, API 34, NDK r27): the two forward
   RGB cameras appear as ordinary Camera2 devices, 1280×960 YUV420 at up to
   60 Hz, with 20–40 ms capture latency (u). `horizonos.permission.HEADSET_CAMERA`
@@ -102,6 +105,12 @@ the first one enumerated (OPAQUE on Quest), and the layer has no alpha flags.
    placed in the world where they were seen.
 5. **Example**: an `examples-android` passthrough sample, so this is tested
    in Blade itself and not only through RedEye.
+6. **GPU timing without calibrated timestamps.** Adreno lacks
+   `VK_EXT_calibrated_timestamps`, and Blade turned timing off without it,
+   so Meganeura's profiler had nothing to read on the Quest. Branch
+   `timing-without-calibration` anchors each submission's first timestamp
+   to the CPU time at submit: durations stay exact, start times are
+   approximate. The Quest profile in Frame budget was taken with it.
 
 ### Meganeura (rev `b25f763`, 0.3)
 
@@ -123,8 +132,9 @@ the stack end to end and was not optimised for the Quest.
     to 5.5e-5 (logits) and 9.2e-6 (boxes) at 640×480, and 2.0e-5 and
     3.4e-6 at 640×640. Its graph is 6053 nodes and **1967 dispatches**,
     against 370 for the imported YOLOX-Nano export (254 for our hand-built
-    graph). Most come from TopK, lowered as one pass per
-    selected element (see item 3 below).
+    graph). Many come from TopK, lowered as one pass per
+    selected element, but on the Quest its time is in the convolutions
+    (see Frame budget).
   - This export still goes through onnx-simplifier (`--simplify`). It
     builds D-FINE's box-weighting table with `Pow(x, 1/15)` from two scalar
     parameters (`up`, `reg_scale`) through two `Abs` ops, and the importer's
@@ -176,23 +186,23 @@ the stack end to end and was not optimised for the Quest.
 Ordered by what unblocks RedEye soonest. Each item lands upstream with
 Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
 
-1. **Quest 3 device facts.** Qualification so far ran on a Quest 3S, whose
-   Adreno 740 driver exposes packed int-dot and 64-lane subgroups, but
-   neither `shaderFloat16` nor cooperative matrices. Re-query on a Quest 3
-   with current Horizon OS: f16 arithmetic, `VK_KHR_cooperative_matrix`,
-   subgroup size control, integer dot product. The answers decide which of
-   the items below pay off. Coopmat and f16 kernels are worth enabling
-   wherever the driver exposes them.
+1. **Device facts: done** (Platform, above). The current driver has f16
+   arithmetic but no cooperative matrices, so f16 compute in the conv and
+   matmul kernels is the lever, not coopmat.
 2. **Calibration benchmark on device**: a native (non-XR) APK as in
    DinoVision's `android/`, timing conv, depthwise, matmul and attention
    archetypes and whole models, with thermal state recorded.
 3. **D-FINE's cost and import path** (all its ops now import):
+   - **Convolution throughput on Adreno.** Measured on the Quest (Frame
+     budget), D-FINE-N takes 123 ms of GPU time, 61% of it in 81
+     `Conv2dGemm*` dispatches and 18% in matmuls. That is a few percent of
+     the Adreno 740's f32 peak. Tiling for 64-wide subgroups and f16
+     arithmetic come first.
    - **A real TopK kernel.** D-FINE selects 300 of 1500 anchors at
      640×480 (2000 at 640²); the current lowering takes one max-and-mask
-     pass per element, so about 1,500 of its 1967 dispatches. A
-     single-dispatch select (bitonic or radix) would bring D-FINE near
-     YOLOX's dispatch count. This decides whether D-FINE is affordable on
-     the Quest.
+     pass per element. A single-dispatch select (bitonic or radix) cuts
+     the dispatch count, but all 841 data-movement dispatches together
+     take 10 ms on the Quest, so it comes after the convolutions.
    - Fold `Abs` (D-FINE's box-weighting table) and `Transpose`
      (Moonshine's rotary tables), so raw exports import without
      onnx-simplifier.
@@ -403,6 +413,32 @@ YOLOX-Nano leaves headroom for one optional extension on a staggered
 cadence. D-FINE-N does not fit the budget at these estimates until the
 TopK kernel and Adreno tuning land; the device measurement decides between
 them.
+
+**Measured on a Quest 3S** (Horizon OS 210, the XR app, camera streaming,
+November 2026). The display runs at 72 Hz.
+
+| Detector | Render | Detect | Latency | GPU per inference |
+|---|---|---|---|---|
+| none | 72.0 Hz | — | — | — |
+| YOLOX-Nano @416×320 | 68–71 Hz | 18–20 Hz | 32 ms | — |
+| D-FINE-N @640×480, 2 submission chunks | 17–19 Hz | 7.5 Hz | 127–132 ms | 123 ms |
+| D-FINE-N, 24 chunks | 22–34 Hz | 7 Hz | 130–141 ms | |
+| D-FINE-N, 64 chunks | 38–40 Hz | 6.5 Hz | 140–150 ms | |
+
+D-FINE's GPU time by kernel family (Meganeura's profiler, 1967 dispatches):
+
+| Family | Dispatches | GPU ms | Share |
+|---|---|---|---|
+| convolution (`Conv2dGemm*`) | 81 | 70.9 | 61% |
+| matmul | 64 | 20.6 | 18% |
+| data movement | 841 | 10.4 | 9% |
+| pointwise | 628 | 8.7 | 8% |
+| normalisation, reduction | 353 | 5.8 | 5% |
+
+D-FINE occupies the GPU so much of the time that the renderer misses
+frames; finer submission chunks let it interleave but slow inference.
+YOLOX-Nano fits today. Thermals: SoC at about 36 °C after a few minutes,
+no throttling.
 
 ## Risks and open questions
 

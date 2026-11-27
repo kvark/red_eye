@@ -454,6 +454,11 @@ then TopK in one dispatch (PR #397):
 
 The #397 column (single-dispatch TopK) was measured natively, outside
 the XR app, where an unprofiled inference takes 45 ms of wall time.
+GPU clocks move these numbers: after the PR reviews' changes (which
+leave the Quest's kernel choices as they were), repeated native runs
+measure 37.9 ms of GPU time and 39.5 ms of wall time, while the first
+run after an idle stretch measured 68 ms. Compare runs taken back to
+back.
 
 Run-to-run variation is about 10% (convolutions are unchanged between
 #394 and #395). The products no longer pack horizontally or split K, so

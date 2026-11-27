@@ -25,6 +25,30 @@ pub struct Track {
     pub age: u32,
 }
 
+/// The confirmed track the wearer is looking at: the one whose box holds
+/// `focus` (normalised image coordinates), the smallest if several do, or
+/// else the one whose box comes nearest it.
+pub fn focused(tracks: &[Track], focus: [f32; 2], min_hits: u32) -> Option<&Track> {
+    let distance = |t: &Track| {
+        let dx = (t.rect.min[0] - focus[0])
+            .max(focus[0] - t.rect.max[0])
+            .max(0.0);
+        let dy = (t.rect.min[1] - focus[1])
+            .max(focus[1] - t.rect.max[1])
+            .max(0.0);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let area = |t: &Track| (t.rect.max[0] - t.rect.min[0]) * (t.rect.max[1] - t.rect.min[1]);
+    tracks
+        .iter()
+        .filter(|t| t.is_confirmed(min_hits))
+        .min_by(|a, b| {
+            distance(a)
+                .total_cmp(&distance(b))
+                .then(area(a).total_cmp(&area(b)))
+        })
+}
+
 impl Track {
     /// Seen often enough to stop being a flicker. The HUD should only lock
     /// onto confirmed tracks.
@@ -140,6 +164,31 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_picks_the_box_it_falls_in_then_the_nearest() {
+        let track = |id: TrackId, rect: Rect| Track {
+            id,
+            label: Label::PERSON,
+            rect,
+            score: 0.9,
+            hits: 3,
+            misses: 0,
+            age: 3,
+        };
+        let tracks = [
+            track(1, Rect::new(0.0, 0.0, 1.0, 1.0)),
+            track(2, Rect::new(0.4, 0.4, 0.6, 0.6)),
+            track(3, Rect::new(0.8, 0.0, 0.9, 0.1)),
+        ];
+        // Inside both 1 and 2: the smaller.
+        assert_eq!(focused(&tracks, [0.5, 0.5], 2).unwrap().id, 2);
+        // Inside only the big one.
+        assert_eq!(focused(&tracks[..1], [0.1, 0.9], 2).unwrap().id, 1);
+        // Outside all of 2 and 3: the nearer.
+        assert_eq!(focused(&tracks[1..], [0.75, 0.05], 2).unwrap().id, 3);
+        assert!(focused(&[], [0.5, 0.5], 2).is_none());
+    }
 
     fn person(x: f32, score: f32) -> Detection {
         Detection {

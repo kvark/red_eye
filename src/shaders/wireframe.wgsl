@@ -4,8 +4,10 @@
 // image with the grade pass's placement, premultiplied alpha.
 
 struct Params {
-    // Clip-space scale (xy) and offset (zw) of the camera image.
-    placement: vec4<f32>,
+    // The image-to-clip map's rows, as the grade pass places quads.
+    place_x: vec4<f32>,
+    place_y: vec4<f32>,
+    place_w: vec4<f32>,
     // display-referred colour (rgb), opacity (a)
     color: vec4<f32>,
     // depth units per contour, line width (px), phase (contours), highlight id
@@ -19,6 +21,14 @@ var<uniform> params: Params;
 var mask_texture: texture_2d<f32>;
 var depth_texture: texture_2d<f32>;
 
+// The placement: a projective map from the camera quad's local space
+// (x right, y up, -1..1) to clip space, as three rows of a 3x3 matrix
+// (w unused). An affine placement has a last row of (0, 0, 1).
+fn place(local: vec2<f32>) -> vec4<f32> {
+    let p = vec3<f32>(local, 1.0);
+    return vec4<f32>(dot(params.place_x.xyz, p), dot(params.place_y.xyz, p), 0.0, dot(params.place_w.xyz, p));
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -28,7 +38,7 @@ struct VertexOutput {
 fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
     let local = vec2<f32>(4.0 * f32(vi & 1u) - 1.0, 4.0 * f32(vi >> 1u) - 1.0);
     var out: VertexOutput;
-    out.position = vec4<f32>(local * params.placement.xy + params.placement.zw, 0.0, 1.0);
+    out.position = place(local);
     out.uv = vec2<f32>(0.5 * local.x + 0.5, 0.5 - 0.5 * local.y);
     return out;
 }

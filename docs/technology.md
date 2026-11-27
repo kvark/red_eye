@@ -25,9 +25,14 @@ checked before a decision depends on it.
   60 Hz, with 20–40 ms capture latency (u). `horizonos.permission.HEADSET_CAMERA`
   must be granted at runtime. Meta's vendor tags cannot be resolved, because
   `ACameraManager_getTagFromName` is not exported (Horizon OS v205), so the
-  cameras are identified by capability. Whether the standard
-  `LENS_INTRINSIC_CALIBRATION` / `LENS_POSE_*` tags are populated is open;
-  we need them to map image detections into the world.
+  cameras are identified by capability. The standard
+  `LENS_INTRINSIC_CALIBRATION` and `LENS_POSE_*` tags are populated (Quest
+  3S, Horizon OS 210), relative to the gyroscope, which is OpenXR's view
+  space: the left camera's sensor is 1728×1728 with f = 1170 px (about 73°
+  across a 1280×960 stream), it sits 3.1 cm left, 1.2 cm below and 7.5 cm
+  ahead of the head's centre, and it looks 5.8° down. No lens distortion is
+  reported. `src/projection.rs` places camera-image overlays into each eye
+  from these, through a plane 1.5 m ahead.
 - **`XR_FB_passthrough`**: the compositor's own passthrough, stereo-correct at
   display rate. A passthrough layer accepts a style with a
   **256-entry mono→RGBA colour map** (`XrPassthroughColorMapMonoToRgbaFB`)

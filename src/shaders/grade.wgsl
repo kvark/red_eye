@@ -15,12 +15,24 @@ struct GradeParams {
 }
 var<uniform> params: GradeParams;
 
-// Where the camera image lands in clip space: xy = scale, zw = offset.
-// Lets an eye place a 4:3 camera frame inside an asymmetric frustum.
+// Where the camera image lands in clip space: the rows of a projective map
+// from the image quad's local space. Lets an eye place a 4:3 camera frame
+// inside an asymmetric frustum, or project it through the camera's pose.
 struct Placement {
-    transform: vec4<f32>,
+    x: vec4<f32>,
+    y: vec4<f32>,
+    w: vec4<f32>,
 }
 var<uniform> placement: Placement;
+
+// The placement: a projective map from the camera quad's local space
+// (x right, y up, -1..1) to clip space, as three rows of a 3x3 matrix
+// (w unused). An affine placement has a last row of (0, 0, 1).
+fn place(local: vec2<f32>) -> vec4<f32> {
+    let p = vec3<f32>(local, 1.0);
+    return vec4<f32>(dot(placement.x.xyz, p), dot(placement.y.xyz, p), 0.0, dot(placement.w.xyz, p));
+}
+
 
 var luma_texture: texture_2d<f32>;
 var luma_sampler: sampler;
@@ -37,7 +49,7 @@ struct VertexOutput {
 fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
     let local = vec2<f32>(4.0 * f32(vi & 1u) - 1.0, 4.0 * f32(vi >> 1u) - 1.0);
     var out: VertexOutput;
-    out.position = vec4<f32>(local * placement.transform.xy + placement.transform.zw, 0.0, 1.0);
+    out.position = place(local);
     out.uv = vec2<f32>(0.5 * local.x + 0.5, 0.5 - 0.5 * local.y);
     return out;
 }

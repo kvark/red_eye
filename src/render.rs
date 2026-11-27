@@ -19,16 +19,26 @@ use crate::grade::{Grade, GradeUniforms};
 /// `Placement` in `shaders/grade.wgsl`: clip-space scale (xy) and offset
 /// (zw) of the camera quad.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Placement {
-    pub transform: [f32; 4],
+    /// Rows of a 3×3 projective map from the camera quad's local space
+    /// (x right, y up, -1..1) to clip space `(x, y, w)`; each row's fourth
+    /// value is unused. Projective, so an image can be placed through the
+    /// camera's pose and a plane in front of it, not only scaled.
+    pub rows: [[f32; 4]; 3],
 }
 
 impl Placement {
     /// The quad fills the target exactly.
-    pub const FULLSCREEN: Self = Self {
-        transform: [1.0, 1.0, 0.0, 0.0],
-    };
+    pub const FULLSCREEN: Self = Self::affine([1.0, 1.0, 0.0, 0.0]);
+
+    /// Scale (`x, y`) and offset (`z, w`) the quad in clip space.
+    pub const fn affine(transform: [f32; 4]) -> Self {
+        let [sx, sy, ox, oy] = transform;
+        Self {
+            rows: [[sx, 0.0, ox, 0.0], [0.0, sy, oy, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        }
+    }
 
     /// Letterbox an image of `image_aspect` (width / height) into a target
     /// of `target_aspect`, preserving its shape.
@@ -38,9 +48,14 @@ impl Placement {
         } else {
             (image_aspect / target_aspect, 1.0)
         };
-        Self {
-            transform: [sx, sy, 0.0, 0.0],
-        }
+        Self::affine([sx, sy, 0.0, 0.0])
+    }
+
+    /// Where a point of the quad's local space lands, in normalised device
+    /// coordinates (divided through).
+    pub fn map(&self, local: [f32; 2]) -> [f32; 2] {
+        let [x, y, w] = self.rows.map(|r| r[0] * local[0] + r[1] * local[1] + r[2]);
+        [x / w, y / w]
     }
 }
 
@@ -254,7 +269,7 @@ impl Default for WireframeStyle {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct WireframeParams {
-    placement: [f32; 4],
+    placement: [[f32; 4]; 3],
     color: [f32; 4],
     contour: [f32; 4],
     style: [f32; 4],
@@ -455,7 +470,7 @@ impl WireframePass {
             0,
             &WireframeData {
                 params: WireframeParams {
-                    placement: placement.transform,
+                    placement: placement.rows,
                     color: style.color,
                     contour: [
                         style.spacing.max(1e-6),
@@ -505,7 +520,7 @@ impl BoxInstance {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct BoxParams {
-    placement: [f32; 4],
+    placement: [[f32; 4]; 3],
     viewport: [f32; 4],
 }
 
@@ -592,7 +607,7 @@ impl BoxPass {
             0,
             &BoxData {
                 params: BoxParams {
-                    placement: placement.transform,
+                    placement: placement.rows,
                     viewport: [target_size[0] as f32, target_size[1] as f32, thickness, 0.0],
                 },
                 boxes: self.buffer.into(),

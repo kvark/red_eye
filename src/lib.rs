@@ -28,6 +28,7 @@ pub mod frame;
 pub mod grade;
 pub mod hud;
 pub mod perception;
+pub mod projection;
 pub mod render;
 pub mod source;
 

@@ -3,8 +3,10 @@
 // normalised image coordinates lands on what the camera saw.
 
 struct Params {
-    // Same as the grade pass: clip-space scale (xy) and offset (zw).
-    placement: vec4<f32>,
+    // Same as the grade pass: the image-to-clip map's rows.
+    place_x: vec4<f32>,
+    place_y: vec4<f32>,
+    place_w: vec4<f32>,
     // viewport width, viewport height, line thickness (px), unused
     viewport: vec4<f32>,
 }
@@ -22,9 +24,21 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 }
 
+
+// The placement: a projective map from the camera quad's local space
+// (x right, y up, -1..1) to clip space, as three rows of a 3x3 matrix
+// (w unused). An affine placement has a last row of (0, 0, 1).
+fn place(local: vec2<f32>) -> vec4<f32> {
+    let p = vec3<f32>(local, 1.0);
+    return vec4<f32>(dot(params.place_x.xyz, p), dot(params.place_y.xyz, p), 0.0, dot(params.place_w.xyz, p));
+}
+
+// Divided through, so the outline's thickness is added in clip units and
+// its edges stay straight: a projective map keeps lines lines.
 fn to_clip(uv: vec2<f32>) -> vec2<f32> {
     let local = vec2<f32>(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y);
-    return local * params.placement.xy + params.placement.zw;
+    let clip = place(local);
+    return clip.xy / clip.w;
 }
 
 @vertex

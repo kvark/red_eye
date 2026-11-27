@@ -211,8 +211,11 @@ because the lines come from interpolated values.
 - Meganeura's calibration benchmark (ms/GMAC per kernel archetype), now
   that GPU timing works on Adreno (Blade branch
   `timing-without-calibration`).
-- Camera intrinsics and extrinsics: standard Camera2 tags, or a one-off
-  calibration.
+- Camera intrinsics and extrinsics: **done**. Camera2 reports them, and
+  overlays are projected into each eye through a plane 1.5 m ahead
+  (`src/projection.rs`). Off that plane they are off by the camera-to-eye
+  parallax, a degree or two at arm's length in the right eye; metric depth
+  per object (item 9) removes it.
 - World-space targets: detections placed through depth and the head pose at
   capture time, so locks stay on people as the head moves.
 - Thermals: log them with timings, as DinoVision does.

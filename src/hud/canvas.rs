@@ -26,7 +26,7 @@ const FORMAT: gpu::TextureFormat = gpu::TextureFormat::Rgba8UnormSrgb;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeParams {
-    placement: [f32; 4],
+    placement: [[f32; 4]; 3],
     flags: [f32; 4],
 }
 
@@ -230,7 +230,7 @@ impl Canvas {
             0,
             &CompositeData {
                 params: CompositeParams {
-                    placement: placement.transform,
+                    placement: placement.rows,
                     flags: [if linear_target { 1.0 } else { 0.0 }, opacity, 0.0, 0.0],
                 },
                 hud_texture: self.view,

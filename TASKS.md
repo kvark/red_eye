@@ -69,45 +69,65 @@ RedEye side:
 
 ## 4. Segmentation: silhouettes and masks
 
-**Status: idea.**
+**Status: evaluated; blocked** (Meganeura: three importer additions).
 
 Uses: T2's traced outlines around the subject (M6), the wireframe (item 6),
 and size assessment (M5). The wireframe shows whatever masks the network
 produces, so instance masks for everything and a mask only for the target
-both work. Masking only the locked target keeps it
-cheap: a box-prompted model on the target's crop, every few frames.
+both work.
 
-Candidates (evaluate with `tools/onnx_reference.py` and
-`examples/onnx_check.rs`):
+Evaluated through the importer on the YOLOX demo photo. Numbers are from
+lavapipe; Quest times are estimated at 0.1 GMAC/ms. Scripts are in
+`tools/experiments/segdepth/`.
 
-| Model | Licence | Notes |
-|---|---|---|
-| EdgeTAM | Apache-2.0 | Box-prompted, carries the mask across frames; image encoder about 19 ms on the Snapdragon NPU (unverified for our GPU path) |
-| RF-DETR-Seg-Nano | Apache-2.0 | Boxes and masks for everything in one model; could replace the detector |
-| EoMT-S | MIT code, DINOv2/v3 weights | Plain ViT plus queries; heavy at 640 |
-| BlazePose (segmentation) | Apache-2.0 | Person mask plus 33 keypoints; people only |
+| Model | Licence | Cost | Masks | Importer gaps |
+|---|---|---|---|---|
+| **RF-DETR-Seg-Nano** at 312² (first choice) | Apache-2.0 | 22.7 GMAC, ~227 ms | Boxes and instance masks for all of COCO in one model, 78×78. Bicycle 0.95, dog 0.94, truck 0.82; masks right but coarse | runtime `Sin`/`Cos` (×4 each), `Where` on runtime data (×1), `Einsum` `bchw,bnc->bnhw` (×1). With those rewritten: matches onnxruntime (1.7e-3 on mask logits), 1342 dispatches |
+| EdgeTAM, box-prompted (sharper, one target) | Apache-2.0 | encoder 19.4 GMAC at 1024² (~194 ms) + decoder 1.8 GMAC | 256×256, IoU 0.97 on dog and truck | encoder: `ReduceMean` over [2,3] (×10, is `GlobalAveragePool`); prompt path: runtime `Sin`/`Cos`, `ScatterND`, an INT64 input (or encode prompts on the CPU) |
+| MobileSAM, EfficientViT-SAM-L0 | Apache-2.0 | 35–39 GMAC | — | `ReduceMean` over axis 1 (LayerNorm2d). Too heavy |
+| DeepLabV3-MobileNetV2 (VOC) | Apache-2.0 | 8.8 GMAC | Semantic only, no instances | dilated depthwise `Conv`, `AveragePool`, `ArgMax`, UINT8 input |
 
-Excluded: YOLO-seg and FastSAM (AGPL).
+Excluded: YOLO-seg and FastSAM (AGPL). The only RF-DETR-Seg ONNX found is a
+third-party export with its output names swapped. Re-export from
+`Roboflow/rf-detr-seg-nano` before relying on it. RF-DETR-Seg could also
+replace D-FINE as the detector, since it outputs boxes too.
 
-The first visible result would be an outline from the mask (marching squares,
-or edges in a shader) in the HUD preview.
+Next: once Meganeura has the three ops, add a `perception::rfdetr` like
+`dfine.rs`, producing detections and a `dense::Mask`. Run it on a staggered
+cadence, or on the target's crop.
 
 ## 5. Depth
 
-**Status: blocked** (Blade: environment depth). **Idea** for the monocular
-fallback.
+**Status: ready** for the monocular model. **Blocked** for the Quest Depth
+API (Blade: environment depth).
 
-The Quest Depth API (`XR_META_environment_depth`) is free in the sense that
-the system computes it and our GPU pays nothing. It is not wired into the app
-yet. It is low resolution with soft edges (exact numbers unverified), and it
-comes from different sensors than the camera. Using it with camera-image
-masks means reprojecting through the head pose at the camera's capture time
-(Blade work items 3–4).
+- **Depth Anything V2 Small** (Apache-2.0, `onnx-community/depth-anything-v2-small`)
+  imports through Meganeura **with no gaps**:
+  - at 266², 11.9 GMAC (~119 ms on the Quest), 432 dispatches, matching
+    onnxruntime to 5.4e-5;
+  - at 224², ~82 ms;
+  - at 364×476, 33 GMAC.
 
-The alternative is Depth Anything V2 Small (Apache-2.0) on the target's
-crop only. It gives relative depth, pixel-aligned with the camera image
-and the mask, with metric scale taken from the Depth API's median over the
-target.
+  It outputs relative inverse depth at the input resolution. It is
+  plausible on the demo photo: near porch and dog, far street and truck,
+  crisp wheel edges. Run it on the target's crop, pixel-aligned with the
+  camera image and the mask. Its contours are of disparity, so they are
+  spaced unevenly in depth, which is fine for the look.
+- **Depth Anything 3 Small** (Apache-2.0) outputs depth (up to scale), so its
+  contours are evenly spaced. Same cost at 266². One gap: a `ScatterND`
+  writing a constant row into a runtime tensor. Rewritten as Slice and
+  Concat, it matches onnxruntime to 7.8e-6.
+- **The Quest Depth API** (`XR_META_environment_depth`) costs our GPU
+  nothing, but it is not wired up yet. It is low resolution with soft edges
+  (exact numbers unverified), and it comes from different sensors than the
+  camera, so using it means reprojecting through the head pose at capture
+  time (Blade work items 3–4). Use it for metric scale (its median over the
+  target) and for world-space positions.
+
+Next: a `perception::depth` running DA-V2-S on a crop into a
+`dense::DepthMap`, scheduled with segmentation. An estimated ~350 ms per
+segmentation-plus-depth cycle means about 3 Hz on the worker, a guess until
+measured on the Quest.
 
 Uses: size assessment (M5), world-space targets and lock prediction (M3),
 and the wireframe.
@@ -133,8 +153,9 @@ because the lines come from interpolated values.
   - The outline where the instance id changes, and a faint fill.
   - One highlighted instance (the locked target) brighter than the rest.
   - A phase that makes the contours drift, for a scanning look.
-- Next: feed it from the chosen segmentation and depth models, and show it
-  in `examples/hud.rs` and the XR app.
+- Next: feed it from RF-DETR-Seg-Nano masks (item 4) and DA-V2-S depth
+  (item 5), first in `examples/hud.rs` on the demo photo, then in the XR app.
+  Depth can be wired now; masks wait on the importer.
 
 ## 7. HUD mechanics
 

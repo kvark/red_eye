@@ -206,11 +206,23 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      `Gather` on the embedding.
    - Without onnx-simplifier, the decoder also needs `Trilu`, plus
      `Slice` with runtime bounds, for its causal mask and rotary tables.
-5. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
+5. **Segmentation and depth for the wireframe** (TASKS.md items 4–5;
+   scripts in `tools/experiments/segdepth/`):
+   - RF-DETR-Seg-Nano: runtime `Sin` and `Cos` (the decoder's sine
+     embedding of reference boxes), `Where` on runtime data, and `Einsum`
+     in the form `bchw,bnc->bnhw` (the mask head; lowering it to MatMul
+     suffices).
+   - EdgeTAM: `ReduceMean` over axes [2, 3] (that is `GlobalAveragePool`),
+     plus, for runtime box prompts, `ScatterND`, runtime `Sin` and `Cos`,
+     and an INT64 input.
+   - Depth Anything 3 Small: `ScatterND` writing a constant row into a
+     runtime tensor.
+   - Depth Anything V2 Small already imports with no gaps.
+6. **More importer coverage**: AveragePool, PRelu/HardSwish, Min/Max,
    non-last-axis Softmax. Candidate models are evaluated from their
    exports with `tools/onnx_reference.py` and `examples/onnx_check.rs`
    before anything is hand-written.
-6. **Adreno kernels**:
+7. **Adreno kernels**:
    - int8 convolution and matmul on packed `dot4I8Packed`. It exists today
      for LLM GEMV only; extending it to conv is likely the largest win for
      CNNs, given no f16 arithmetic.
@@ -220,7 +232,7 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
    - Fusion of conv, BatchNorm and activation, and of our preprocessing into
      the first conv.
    - Fewer dispatches and barriers per graph.
-7. **Training gaps for fine-tuning**: a `Conv2dDw` backward pass (pose and
+8. **Training gaps for fine-tuning**: a `Conv2dDw` backward pass (pose and
    face nets are depthwise-heavy), and detection losses (focal,
    GIoU/L1 box regression) with CPU-side Hungarian matching.
 
@@ -280,6 +292,10 @@ Upgrades if quality demands them, in order of effort:
    path loads it.
 3. **More names** than COCO's 80 via Objects365-trained weights (365
    classes), where an Apache release exists for the chosen architecture.
+
+**Evaluated for the wireframe and voice** (all Apache-2.0 or MIT):
+RF-DETR-Seg-Nano and EdgeTAM (segmentation), Depth Anything V2 and V3 Small
+(depth), Moonshine-tiny (speech). See TASKS.md items 3–5.
 
 **Licences.** Excluded: Ultralytics YOLOv8/11/26 (AGPL), YOLO-World (GPL),
 and DEIMv2 and other non-commercial weights. DINOv3 derivatives carry its

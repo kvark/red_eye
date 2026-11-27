@@ -112,8 +112,9 @@ cadence, or on the target's crop.
 ## 5. Depth
 
 **Status: done** on the host and the Quest for the monocular model
-(`perception::depth`, Depth Anything V2 Small). The Quest Depth API comes
-with Blade PR #428 (environment depth), not yet wired.
+(`perception::depth`, Depth Anything V2 Small). The Quest Depth API is
+wired (`perception::environment`), and the app is waiting on the Blade pin
+bump (Meganeura #399) to land.
 
 - **Depth Anything V2 Small** (Apache-2.0, `onnx-community/depth-anything-v2-small`)
   imports through Meganeura **with no gaps**:
@@ -132,11 +133,18 @@ with Blade PR #428 (environment depth), not yet wired.
   writing a constant row into a runtime tensor. Rewritten as Slice and
   Concat, it matches onnxruntime to 7.8e-6.
 - **The Quest Depth API** (`XR_META_environment_depth`) costs our GPU
-  nothing, but it is not wired up yet. It is low resolution with soft edges
-  (exact numbers unverified), and it comes from different sensors than the
-  camera, so using it means reprojecting through the head pose at capture
-  time (Blade work items 3–4). Use it for metric scale (its median over the
-  target) and for world-space positions.
+  nothing. It is low resolution with soft edges, and it comes from
+  different sensors than the camera. `perception::environment` finds where
+  each camera ray meets the sensed surface, iterating between the two
+  viewpoints. Each confirmed track gets the median over the middle of its
+  box, shown as its range in the HUD. The plane that camera-image overlays
+  are placed on follows the outlined object, which removes the
+  camera-to-eye parallax for it.
+  Next:
+  - confirm the encoding and row order on the device;
+  - use the head pose at capture time (`Context::xr_time_ago`) rather than
+    at display time, since the head moves in the ~75 ms between;
+  - scale Depth Anything's contours to metres with it.
 
 Done: `perception::depth` runs DA-V2-S on the whole camera frame into a
 `dense::DepthMap`, on its own thread (`worker::Background`) at most every

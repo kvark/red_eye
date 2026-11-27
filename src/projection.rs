@@ -76,6 +76,18 @@ impl Pose {
             position: rotate(inverse, offset),
         }
     }
+
+    /// A point given in this pose's frame, in its parent's.
+    pub fn apply(&self, point: Vec3) -> Vec3 {
+        let r = rotate(self.orientation, point);
+        [0, 1, 2].map(|i| r[i] + self.position[i])
+    }
+
+    /// A point given in the parent's frame, in this pose's.
+    pub fn inverse_apply(&self, point: Vec3) -> Vec3 {
+        let offset = [0, 1, 2].map(|i| point[i] - self.position[i]);
+        rotate(conjugate(self.orientation), offset)
+    }
 }
 
 /// A pinhole camera in the stream's pixels, and its pose in the head's
@@ -109,6 +121,19 @@ impl CameraModel {
             (self.focal[0] * p[0] / p[2] + self.principal[0]) / w,
             (self.focal[1] * p[1] / p[2] + self.principal[1]) / h,
         ])
+    }
+
+    /// The ray through `uv` (normalised image coordinates, y down), in the
+    /// head's frame, scaled to unit depth along the camera's axis: the
+    /// point at camera depth `s` is `position + s * ray`.
+    pub fn ray(&self, uv: [f32; 2]) -> Vec3 {
+        let [w, h] = self.size.map(|s| s as f32);
+        let local = [
+            (uv[0] * w - self.principal[0]) / self.focal[0],
+            (uv[1] * h - self.principal[1]) / self.focal[1],
+            1.0,
+        ];
+        rotate(self.orientation, local)
     }
 
     /// Where the head's line of sight, at `distance` metres, shows in the
@@ -329,6 +354,11 @@ mod tests {
         let p = camera.project([0.5, 0.5, -2.0]).unwrap();
         assert!(p[0] > 0.5 && p[1] < 0.5, "{p:?}");
         assert_eq!(camera.project([0.0, 0.0, 1.0]), None);
+        // A ray and its projection agree.
+        let uv = [0.3, 0.7];
+        let r = camera.ray(uv);
+        let back = camera.project(r.map(|v| v * 2.5)).unwrap();
+        assert!(close(back, uv, 1e-6), "{back:?}");
     }
 
     #[test]

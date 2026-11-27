@@ -41,6 +41,14 @@ checked before a decision depends on it.
 - **`XR_META_environment_depth`**: system-computed metric depth, low
   resolution, edge bleeding, unreliable under about 0.2 m. Free for the app.
   It is enough for body-measurement scale and for world-space target positions.
+  On the Quest 3S (Horizon OS 210) it starts once
+  `com.oculus.permission.USE_SCENE` is granted, with a 16-bit image per eye
+  for views near the eyes. `perception::environment` resamples it to 160²
+  per eye on the GPU, reads it back a frame later and ranges objects
+  through the camera's rays. Decoded as OpenGL depth, it reads about 1 m to
+  the chair in front of a headset on a desk. The decoding and the row order
+  are still to be confirmed against the camera (`tools/env_depth.py`, and
+  the app's "agrees with the camera" log line).
 - **Hand tracking** for input (pinch, punch-to-damage). No controllers are
   required.
 

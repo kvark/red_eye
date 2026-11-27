@@ -274,3 +274,119 @@ fn wireframe_draws_contours_inside_the_mask() {
     let crossings = (1..w).filter(|&x| at(x - 1) < 100 && at(x) >= 100).count();
     assert!(crossings >= 6, "too few rings crossed: {crossings}");
 }
+
+/// The environment depth resample reads both layers of a depth texture
+/// onto its grid by nearest texel. The Quest's is 16-bit; the shader reads
+/// any depth format alike, and 32-bit float is the one every Blade has.
+#[test]
+#[ignore = "requires a working GPU context"]
+fn environment_depth_resamples_both_layers() {
+    use blade_graphics as gpu;
+    use red_eye::perception::environment::{DepthView, GRID, Resample};
+    use red_eye::projection::Pose;
+
+    let context = red_eye::init_context(None).expect("no GPU");
+    let (width, height) = (64u32, 48u32);
+    // Each texel holds its own coordinates and layer, so any misplaced
+    // read shows.
+    let value = |x: u32, y: u32, layer: u32| (layer * 20000 + y * 300 + x * 3) as f32 / 65535.0;
+    let format = gpu::TextureFormat::Depth32Float;
+    let texture = context.create_texture(gpu::TextureDesc {
+        name: "environment-depth",
+        format,
+        size: gpu::Extent {
+            width,
+            height,
+            depth: 1,
+        },
+        dimension: gpu::TextureDimension::D2,
+        array_layer_count: 2,
+        mip_level_count: 1,
+        usage: gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
+        sample_count: 1,
+        external: None,
+    });
+    let view = context.create_texture_view(
+        texture,
+        gpu::TextureViewDesc {
+            name: "environment-depth",
+            format,
+            dimension: gpu::ViewDimension::D2Array,
+            subresources: &Default::default(),
+        },
+    );
+    let layer_bytes = (width * height * 4) as u64;
+    let staging = context.create_buffer(gpu::BufferDesc {
+        name: "environment-depth-staging",
+        size: 2 * layer_bytes,
+        memory: gpu::Memory::Shared,
+    });
+    let texels: Vec<f32> = (0..2)
+        .flat_map(|l| (0..height).flat_map(move |y| (0..width).map(move |x| value(x, y, l))))
+        .collect();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            texels.as_ptr() as *const u8,
+            staging.data(),
+            texels.len() * 4,
+        );
+    }
+
+    let mut encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
+        name: "environment-depth",
+        buffer_count: 1,
+        manual_barriers: false,
+    });
+    encoder.start();
+    encoder.init_texture(texture);
+    {
+        let mut transfer = encoder.transfer("upload");
+        for layer in 0..2 {
+            transfer.copy_buffer_to_texture(
+                staging.at(layer as u64 * layer_bytes),
+                width * 4,
+                gpu::TexturePiece {
+                    texture,
+                    mip_level: 0,
+                    array_layer: layer,
+                    origin: [0; 3],
+                },
+                gpu::Extent {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            );
+        }
+    }
+    let view_of = DepthView {
+        pose: Pose::IDENTITY,
+        fov: [-0.5, 0.5, 0.5, -0.5],
+    };
+    let mut resample = Resample::new(&context);
+    resample.record(&mut encoder, view, [view_of; 2], 0.1, f32::INFINITY);
+    let sync = context.submit(&mut encoder);
+    let _ = context.wait_for(&sync, !0);
+    let depth = resample.read().expect("a recorded resample");
+    assert!(resample.read().is_none(), "read twice");
+
+    let [gw, gh] = GRID;
+    let mut worst = 0.0f32;
+    for layer in 0..2 {
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let x = ((gx as f32 + 0.5) * width as f32 / gw as f32) as u32;
+                let y = ((gy as f32 + 0.5) * height as f32 / gh as f32) as u32;
+                let expected = value(x, y, layer);
+                let got = depth.raw[((layer * gh + gy) * gw + gx) as usize];
+                worst = worst.max((got - expected).abs());
+            }
+        }
+    }
+    resample.destroy(&context);
+    context.destroy_command_encoder(&mut encoder);
+    context.destroy_buffer(staging);
+    context.destroy_texture_view(view);
+    context.destroy_texture(texture);
+    assert!(worst < 1e-6, "resampled depth deviates by {worst}");
+}

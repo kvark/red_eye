@@ -19,7 +19,7 @@ use egui::{Color32, Pos2, Rect, Vec2, pos2, vec2};
 use super::grid;
 use super::targeting::{Phase, Targeting};
 use super::text::Typewriter;
-use crate::perception::track::Track;
+use crate::perception::track::{Track, TrackId};
 
 /// Telemetry the number blocks report alongside their filler.
 #[derive(Clone, Copy, Debug, Default)]
@@ -42,6 +42,9 @@ const SHADOW: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 #[derive(Default)]
 pub struct Hud {
     pub targeting: Targeting,
+    /// Metres to each track that the headset's depth reaches, as the app
+    /// measured them last; tracks without one show no range.
+    pub ranges: std::collections::HashMap<TrackId, f32>,
     small: grid::Glyphs,
     large: grid::Glyphs,
 }
@@ -244,7 +247,10 @@ impl Hud {
         if target.is_none() {
             for t in &listed {
                 let corner = at(t.rect.min[0], t.rect.min[1]);
-                let label = format!("{} {:.2}", t.label.name().to_uppercase(), t.score);
+                let mut label = format!("{} {:.2}", t.label.name().to_uppercase(), t.score);
+                if let Some(range) = self.ranges.get(&t.id) {
+                    label += &format!(" {range:.1}M");
+                }
                 text.write(ui, corner - vec2(0.0, row * 1.1), &label, TEXT);
             }
         }
@@ -268,6 +274,10 @@ impl Hud {
             }
             let label = t.label.name().to_uppercase();
             text.write(ui, r.left_top() - vec2(0.0, row * 1.2), &label, TEXT);
+            if let Some(range) = self.ranges.get(&t.id) {
+                let range = format!("RANGE {range:04.1} M");
+                text.write(ui, r.left_bottom() + vec2(0.0, row * 0.3), &range, TEXT);
+            }
         }
         text.finish(ui);
 

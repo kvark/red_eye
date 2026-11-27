@@ -17,6 +17,7 @@
 pub mod dense;
 pub mod depth;
 pub mod dfine;
+pub mod environment;
 pub mod labels;
 pub mod preprocess;
 pub mod track;

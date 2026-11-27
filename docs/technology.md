@@ -199,10 +199,12 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      no workgroup memory) runs D-FINE-N's convolutions in 24 ms instead of
      71. Left: split-K for the deep 1×1 convolutions at 15×20 (about
      150 GFLOP/s), per-shape block tuning, and f16 arithmetic.
-   - **Matmul throughput on Adreno.** Now D-FINE's largest family at
-     21.6 ms: its 300-query decoder products (`300×128×512`, batched
-     `8×300×16×300`) reach about 50 GFLOP/s. The same register-blocking
-     approach should apply.
+   - **Matmul throughput on Adreno: done for plain and batch-major f32
+     products** (PR #395, branch `adreno-matmul`, stacked on #394). A
+     register kernel (4 rows × vec4 per thread, threads over (row block,
+     column) pairs) takes D-FINE's products from 21.6 to 5.1 ms. Products
+     with fused epilogues or prologues, transposed operands, or N or K not
+     a multiple of four keep the shared-memory tiles.
    - **A real TopK kernel.** D-FINE selects 300 of 1500 anchors at
      640×480 (2000 at 640²); the current lowering takes one max-and-mask
      pass per element. A single-dispatch select (bitonic or radix) cuts
@@ -430,18 +432,25 @@ November 2026). The display runs at 72 Hz.
 | D-FINE-N, 24 chunks | 22–34 Hz | 7 Hz | 130–141 ms | |
 | D-FINE-N, 64 chunks | 38–40 Hz | 6.5 Hz | 140–150 ms | |
 | D-FINE-N, 2 chunks, register-blocked convolutions | 51 Hz | 9.6 Hz | 95–99 ms | 75 ms |
+| D-FINE-N, also register-tiled products | 54–56 Hz | 10.6 Hz | 80–90 ms | 61 ms |
 
-D-FINE's GPU time by kernel family (Meganeura's profiler, 1967
-dispatches), before and after the register-blocked convolution kernel
-(Meganeura PR #394):
+D-FINE's GPU time by kernel family (Meganeura's profiler, about 1967
+dispatches), at Meganeura `b25f763`, then with the register-blocked
+convolution kernel (PR #394), then also with register-tiled products
+(PR #395):
 
-| Family | Dispatches | GPU ms | Share | After #394 |
+| Family | Dispatches | `b25f763` | #394 | #395 |
 |---|---|---|---|---|
-| convolution (`Conv2dGemm*`) | 81 | 70.9 | 61% | 24.1 ms |
-| matmul | 64 | 20.6 | 18% | 21.6 ms |
-| data movement | 841 | 10.4 | 9% | 10.5 ms |
-| pointwise | 628 | 8.7 | 8% | 8.9 ms |
-| normalisation, reduction | 353 | 5.8 | 5% | 5.8 ms |
+| convolution (`Conv2dGemm*`) | 81 | 70.9 ms | 24.1 ms | 27.2 ms |
+| matmul | 64 → 70 | 20.6 ms | 21.6 ms | 5.1 ms |
+| data movement | 841 | 10.4 ms | 10.5 ms | 11.1 ms |
+| pointwise | 628 | 8.7 ms | 8.9 ms | 8.9 ms |
+| normalisation, reduction | 353 → 346 | 5.8 ms | 5.8 ms | 6.6 ms |
+| total | | 123 ms | 75 ms | 61 ms |
+
+Run-to-run variation is about 10% (convolutions are unchanged between
+#394 and #395). The products no longer pack horizontally or split K, so
+there are six more of them and seven fewer reductions.
 
 D-FINE occupies the GPU so much of the time that the renderer misses
 frames; finer submission chunks let it interleave but slow inference.

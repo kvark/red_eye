@@ -43,13 +43,14 @@ dispatches together take 10 ms.
 
 Register-blocked convolution and matmul kernels in Meganeura (PRs #394,
 #395, #396) cut D-FINE to 55 ms of GPU time: the display holds about
-60 Hz with detection at 11 Hz and about 80 ms latency.
+60 Hz with detection at 11 Hz and about 80 ms latency. A single-dispatch
+TopK (PR #397) then takes it to 757 dispatches and 49.6 ms (measured
+natively; the XR app's frame rates with it are still to record).
 
 Next:
-- Meganeura: convolutions are still the largest family (24 of 55 ms);
+- Meganeura: convolutions are half of what is left (25 of 50 ms);
   per-shape tuning of the register blocks, and f16 arithmetic.
-- 1,800 small data-movement, pointwise and reduction dispatches take
-  about 27 ms together: fusion and the TopK kernel.
+- About 560 data-movement and pointwise dispatches take 14 ms: fusion.
 - Meanwhile, ship YOLOX-Nano on the device, or cap D-FINE's rate.
 - Meganeura: a single-dispatch TopK kernel, after the convolutions.
 - A capture mode, as DinoVision has, and a fine-tune of the detector on

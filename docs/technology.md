@@ -206,11 +206,11 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      column) pairs) takes D-FINE's products from 21.6 to 5.1 ms. Products
      with fused epilogues or prologues, transposed operands, or N or K not
      a multiple of four keep the shared-memory tiles.
-   - **A real TopK kernel.** D-FINE selects 300 of 1500 anchors at
-     640×480 (2000 at 640²); the current lowering takes one max-and-mask
-     pass per element. A single-dispatch select (bitonic or radix) cuts
-     the dispatch count, but all 841 data-movement dispatches together
-     take 10 ms on the Quest, so it comes after the convolutions.
+   - **A real TopK kernel: done** (PR #397, branch `topk-kernel`).
+     `Graph::top_k_inner` selects and sorts in one dispatch: a radix
+     select and bitonic sort per workgroup for long rows, a thread per
+     row for short ones. D-FINE drops from 1,966 to 757 dispatches and
+     from 55 to 49.6 ms of GPU time.
    - Fold `Abs` (D-FINE's box-weighting table) and `Transpose`
      (Moonshine's rotary tables), so raw exports import without
      onnx-simplifier.
@@ -439,16 +439,21 @@ November 2026). The display runs at 72 Hz.
 D-FINE's GPU time by kernel family (Meganeura's profiler, about 1967
 dispatches), at Meganeura `b25f763`, then with the register-blocked
 convolution kernel (PR #394), then also with register-tiled products
-(PR #395), then small 1×1 convolutions on the product kernel (PR #396):
+(PR #395), then small 1×1 convolutions on the product kernel (PR #396),
+then TopK in one dispatch (PR #397):
 
-| Family | Dispatches | `b25f763` | #394 | #395 | #396 |
+| Family | `b25f763` | #394 | #395 | #396 | #397 |
 |---|---|---|---|---|---|
-| convolution (`Conv2dGemm*`) | 81 | 70.9 ms | 24.1 ms | 27.2 ms | 23.6 ms |
-| matmul | 64 → 70 | 20.6 ms | 21.6 ms | 5.1 ms | 5.0 ms |
-| data movement | 841 | 10.4 ms | 10.5 ms | 11.1 ms | 10.6 ms |
-| pointwise | 628 | 8.7 ms | 8.9 ms | 8.9 ms | 8.8 ms |
-| normalisation, reduction | 353 → 346 | 5.8 ms | 5.8 ms | 6.6 ms | 5.9 ms |
-| total | | 123 ms | 75 ms | 61 ms | 55 ms |
+| convolution (`Conv2dGemm*`) | 70.9 ms | 24.1 ms | 27.2 ms | 23.6 ms | 24.7 ms |
+| matmul | 20.6 ms | 21.6 ms | 5.1 ms | 5.0 ms | 5.1 ms |
+| data movement | 10.4 ms | 10.5 ms | 11.1 ms | 10.6 ms | 7.2 ms |
+| pointwise | 8.7 ms | 8.9 ms | 8.9 ms | 8.8 ms | 6.9 ms |
+| normalisation, reduction | 5.8 ms | 5.8 ms | 6.6 ms | 5.9 ms | 2.8 ms |
+| total | 123 ms | 75 ms | 61 ms | 55 ms | 49.6 ms |
+| dispatches | 1967 | 1967 | 1966 | 1966 | 757 |
+
+The #397 column (single-dispatch TopK) was measured natively, outside
+the XR app, where an unprofiled inference takes 45 ms of wall time.
 
 Run-to-run variation is about 10% (convolutions are unchanged between
 #394 and #395). The products no longer pack horizontally or split K, so

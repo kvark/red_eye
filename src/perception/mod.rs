@@ -15,6 +15,7 @@
 //! frame: `x` right and `y` down, both in `0..=1`.
 
 pub mod dense;
+pub mod depth;
 pub mod dfine;
 pub mod labels;
 pub mod preprocess;

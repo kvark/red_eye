@@ -311,6 +311,15 @@ Upgrades if quality demands them, in order of effort:
 3. **More names** than COCO's 80 via Objects365-trained weights (365
    classes), where an Apache release exists for the chosen architecture.
 
+**Depth.** Depth Anything V2 Small (Apache-2.0; DINOv2 ViT-S with a DPT
+head, 24.8M parameters), `onnx-community/depth-anything-v2-small`, gives
+relative inverse depth from the camera image for the wireframe
+([`perception::depth`](../src/perception/depth.rs)). `tools/fetch_depth.sh`
+folds its ImageNet normalisation into the patch embedding, which is exact
+because that 14×14 convolution has no padding, so it takes D-FINE's 0..1
+RGB. At 224×168 (16×12 patches) it takes about 85 ms on the Quest 3S, at
+336×252 about 180 ms; 432 dispatches either way.
+
 **Evaluated for the wireframe and voice** (all Apache-2.0 or MIT):
 RF-DETR-Seg-Nano and EdgeTAM (segmentation), Depth Anything V2 and V3 Small
 (depth), Moonshine-tiny (speech). See TASKS.md items 3–5.

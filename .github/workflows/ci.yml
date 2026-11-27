@@ -30,11 +30,13 @@ jobs:
           pip install -r tools/requirements.txt
           tools/fetch_yolox.sh
           tools/fetch_dfine.sh
+          tools/fetch_depth.sh
+          tools/fetch_depth.sh 224 168
       - run: cargo test --locked --release -- --include-ignored
       - run: cargo run --locked --release --example preview -- - out
       - run: cargo run --locked --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
       - run: cargo run --locked --release --example detect -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg out/detect-dfine.png
-      - run: cargo run --locked --release --example hud -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg bicycle out
+      - run: cargo run --locked --release --example hud -- ref/dfine_nano_640x480/model.onnx ref/dog.jpg bicycle out ref/depth_small_224x168/model.onnx
       - name: YOLOX through the ONNX importer
         run: |
           cargo run --locked --release --example onnx_check -- ref/yolox_nano_onnx

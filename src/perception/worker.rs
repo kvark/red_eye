@@ -128,12 +128,132 @@ impl Drop for Worker {
     }
 }
 
+/// Any other per-frame job on a thread of its own, with the same contract
+/// as [`Worker`]: frames offered while it is busy are dropped, and the
+/// renderer reads the latest result whenever it likes. Depth runs on one,
+/// at its own pace, beside the detector.
+pub struct Background<T> {
+    tx: mpsc::Sender<Option<Frame>>,
+    latest: Arc<Mutex<Option<T>>>,
+    generation: Arc<AtomicU64>,
+    ready: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl<T: Clone + Send + 'static> Background<T> {
+    /// Start the job. `make` runs on the new thread and returns the function
+    /// each frame is given to; if it fails, the job logs why and never
+    /// becomes ready.
+    pub fn spawn<F, J>(name: &str, make: F) -> Self
+    where
+        F: FnOnce() -> Result<J, String> + Send + 'static,
+        J: FnMut(&Frame) -> T + 'static,
+    {
+        let (tx, rx) = mpsc::channel::<Option<Frame>>();
+        let latest = Arc::new(Mutex::new(None));
+        let generation = Arc::new(AtomicU64::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let (latest, generation, ready) = (
+                Arc::clone(&latest),
+                Arc::clone(&generation),
+                Arc::clone(&ready),
+            );
+            let label = name.to_owned();
+            std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    let mut job = match make() {
+                        Ok(job) => job,
+                        Err(e) => {
+                            log::error!("{label} disabled: {e}");
+                            return;
+                        }
+                    };
+                    ready.store(true, Ordering::Release);
+                    while let Ok(Some(frame)) = rx.recv() {
+                        let result = job(&frame);
+                        if let Ok(mut slot) = latest.lock() {
+                            *slot = Some(result);
+                        }
+                        generation.fetch_add(1, Ordering::AcqRel);
+                        ready.store(true, Ordering::Release);
+                    }
+                })
+                .expect("spawn background thread")
+        };
+        Self {
+            tx,
+            latest,
+            generation,
+            ready,
+            handle: Some(handle),
+        }
+    }
+
+    /// Offer a frame. Returns `false`, without copying it, if the job is
+    /// busy or never started.
+    pub fn submit(&self, frame: &Frame) -> bool {
+        if self
+            .ready
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        self.tx.send(Some(frame.clone())).is_ok()
+    }
+
+    /// The most recent result, if any.
+    pub fn latest(&self) -> Option<T> {
+        self.latest.lock().ok().and_then(|o| o.clone())
+    }
+
+    /// Count of completed results.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Drop for Background<T> {
+    fn drop(&mut self) {
+        let _ = self.tx.send(None);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::frame::Eye;
     use crate::perception::{Detection, Label, Rect};
     use std::time::Duration;
+
+    #[test]
+    fn background_drops_frames_while_busy_and_keeps_the_latest() {
+        let job = Background::spawn("test", || {
+            Ok(|frame: &Frame| {
+                std::thread::sleep(Duration::from_millis(30));
+                frame.timestamp_ns
+            })
+        });
+        let frame = |t: i64| {
+            let mut f = Frame::from_rgb8(2, 2, &[0; 12], Eye::Left);
+            f.timestamp_ns = t;
+            f
+        };
+        while !job.submit(&frame(1)) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Busy: refused, not queued.
+        assert!(!job.submit(&frame(2)));
+        while job.generation() == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(job.latest(), Some(1));
+    }
 
     /// Reports one person whose box follows the frame timestamp, slowly.
     struct Fake {

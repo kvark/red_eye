@@ -27,8 +27,9 @@ Quest 3: setup, first run, what to measure.
 | `src/perception/yolox.rs` | YOLOX network (hand-built Meganeura graph), decode |
 | `src/perception/dfine.rs` | D-FINE through Meganeura's ONNX importer, decode |
 | `src/perception/preprocess.rs` | Each model's `InputSpec`; GPU preprocessing into the session's input buffer, and its CPU reference |
-| `src/perception/worker.rs` | Detector thread: drops frames while busy, publishes observations |
-| `src/perception/dense.rs` | Per-pixel results in camera-image coordinates: instance masks, depth |
+| `src/perception/worker.rs` | Detector thread, and `Background` for other per-frame jobs (depth): drop frames while busy, publish the latest result |
+| `src/perception/dense.rs` | Per-pixel results in camera-image coordinates: instance masks, depth, depth-cut silhouettes |
+| `src/perception/depth.rs` | Depth Anything V2 Small through Meganeura's ONNX importer: relative depth for the wireframe |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `src/hud/canvas.rs` | egui laid out once per frame into an offscreen texture, composited per eye |
 | `src/hud/grid.rs` | Monospace text as one quad batch, copied from Starcom (keep close to it) |
@@ -48,6 +49,7 @@ Quest 3: setup, first run, what to measure.
 ```sh
 cargo test                                  # unit tests
 pip install -r tools/requirements.txt && tools/fetch_yolox.sh && tools/fetch_dfine.sh   # models and references into ref/
+tools/fetch_depth.sh && tools/fetch_depth.sh 224 168   # Depth Anything V2 Small, normalisation folded in
 cargo test --release -- --include-ignored   # + GPU and detector tests (lavapipe: apt install mesa-vulkan-drivers)
 cargo run --release --example preview -- [image] [out-dir]
 cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
@@ -63,6 +65,7 @@ cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 adb shell mkdir -p /data/local/tmp/red_eye && adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx   # preferred when present
+adb push ref/depth_small_224x168/model.onnx /data/local/tmp/red_eye/depth_small.onnx   # the wireframe's depth
 adb shell "echo motorcycle > /data/local/tmp/red_eye/target"   # name a target until voice commands land
 ```
 

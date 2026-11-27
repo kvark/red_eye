@@ -111,8 +111,9 @@ cadence, or on the target's crop.
 
 ## 5. Depth
 
-**Status: ready** for the monocular model. **Blocked** for the Quest Depth
-API (Blade: environment depth).
+**Status: done** on the host and the Quest for the monocular model
+(`perception::depth`, Depth Anything V2 Small). The Quest Depth API comes
+with Blade PR #428 (environment depth), not yet wired.
 
 - **Depth Anything V2 Small** (Apache-2.0, `onnx-community/depth-anything-v2-small`)
   imports through Meganeura **with no gaps**:
@@ -137,18 +138,29 @@ API (Blade: environment depth).
   time (Blade work items 3–4). Use it for metric scale (its median over the
   target) and for world-space positions.
 
-Next: a `perception::depth` running DA-V2-S on a crop into a
-`dense::DepthMap`, scheduled with segmentation. An estimated ~350 ms per
-segmentation-plus-depth cycle means about 3 Hz on the worker, a guess until
-measured on the Quest.
+Done: `perception::depth` runs DA-V2-S on the whole camera frame into a
+`dense::DepthMap`, on its own thread (`worker::Background`) at most every
+250 ms. `tools/fetch_depth.sh` folds the ImageNet normalisation into the
+patch embedding, so the model takes the same 0..1 RGB as D-FINE. On the
+Quest, 224×168 takes about 85 ms and 336×252 about 180 ms; both match
+onnxruntime to 5e-5 (`tests/depth.rs`). Bringing it up found an Adreno
+miscompile in Meganeura's register convolution, fixed in PR #394.
+
+Next: the Depth API for metric scale and world positions; DA-V2 on the
+target's crop if whole-frame depth is too coarse.
 
 Uses: size assessment (M5), world-space targets and lock prediction (M3),
 and the wireframe.
 
 ## 6. Wireframe: depth contours inside masks
 
-**Status: in progress.** The contour pass is built and tested on synthetic
-depth and masks. It needs a real mask source (item 4) and depth (item 5).
+**Status: working on the demo photo** (`examples/hud.rs` with a depth
+model) and wired into the XR app, not yet seen on the headset. Masks come
+from the detector's boxes cut by depth (`dense::silhouettes`): within each
+box, the pixels nearer than its median. That follows the object's outline
+where it stands in front of its background, but takes in whatever stands
+in front of it too (the dog, in the bicycle's box). Item 4's instance masks
+replace it when they land.
 
 Decision: lines of constant depth inside every mask the segmentation
 network produces, whatever its classes, plus the mask outline. There is no
@@ -166,9 +178,10 @@ because the lines come from interpolated values.
   - The outline where the instance id changes, and a faint fill.
   - One highlighted instance (the locked target) brighter than the rest.
   - A phase that makes the contours drift, for a scanning look.
-- Next: feed it from RF-DETR-Seg-Nano masks (item 4) and DA-V2-S depth
-  (item 5), first in `examples/hud.rs` on the demo photo, then in the XR app.
-  Depth can be wired now; masks wait on the importer.
+- In the app: the matched target is outlined alone; with no target named,
+  every confirmed track is. Contours divide the depth range inside the
+  outlines into eight and drift slowly.
+- Next: see it on the headset; RF-DETR-Seg-Nano masks (item 4).
 
 ## 7. HUD mechanics
 

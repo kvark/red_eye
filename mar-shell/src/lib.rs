@@ -29,7 +29,8 @@ pub use listen::Heard;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use blade_graphics as gpu;
@@ -74,6 +75,111 @@ const DETECT_INTERVAL: Duration = Duration::from_millis(41);
 /// renderer's submissions can interleave. Two was best in DinoVision's
 /// co-tenancy sweep.
 const SUBMISSION_CHUNKS: usize = 2;
+
+/// The longest the display loop waits for its own GPU work. A frame takes
+/// a few milliseconds; past this the work is lost (a fence that never
+/// signals), and waiting forever would hang the app, out of reach of the
+/// session's end and of the next launch.
+const GPU_WAIT_MS: u32 = 1000;
+
+/// How long a step of the display loop may take before the watchdog logs
+/// it as stalled. `xrWaitFrame` legitimately blocks while the headset is
+/// off the wearer's face, so a stall is reported, not acted on.
+const STALL: Duration = Duration::from_secs(3);
+
+/// How long the display loop gets to finish once the activity is gone,
+/// before the watchdog ends the process. A process left holding the OpenXR
+/// instance makes every later launch fail.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// The steps of the display loop, for the watchdog's report.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+    Idle,
+    Events,
+    BeginFrame,
+    AcquireImage,
+    WaitPrevious,
+    Sense,
+    Update,
+    Draw,
+    WaitRendered,
+    EndFrame,
+}
+
+const STEPS: [Step; 10] = [
+    Step::Idle,
+    Step::Events,
+    Step::BeginFrame,
+    Step::AcquireImage,
+    Step::WaitPrevious,
+    Step::Sense,
+    Step::Update,
+    Step::Draw,
+    Step::WaitRendered,
+    Step::EndFrame,
+];
+
+/// Where the display loop is, and since when (milliseconds from start).
+static STEP: AtomicU32 = AtomicU32::new(0);
+static STEP_SINCE: AtomicU64 = AtomicU64::new(0);
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn millis() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+fn enter(step: Step) {
+    STEP.store(step as u32, Ordering::Relaxed);
+    STEP_SINCE.store(millis(), Ordering::Relaxed);
+}
+
+/// Wait for `sync`, but not forever: see [`GPU_WAIT_MS`].
+fn wait_gpu(context: &gpu::Context, sync: &gpu::SyncPoint, what: &str) {
+    match context.wait_for(sync, GPU_WAIT_MS) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(
+                "GPU work for {what} is still running after {GPU_WAIT_MS} ms; going on without it"
+            )
+        }
+        Err(e) => warn!("GPU work for {what} failed: {e:?}"),
+    }
+}
+
+/// Watch the display loop from a thread of its own: log a stalled step,
+/// and end the process if the activity is gone and the loop cannot finish.
+fn spawn_watchdog(should_exit: Arc<AtomicBool>) {
+    std::thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            let mut reported = None;
+            let mut exit_seen: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let step = STEPS[STEP.load(Ordering::Relaxed) as usize];
+                let since = STEP_SINCE.load(Ordering::Relaxed);
+                let stalled = Duration::from_millis(millis().saturating_sub(since));
+                if step != Step::Idle && stalled > STALL && reported != Some(since) {
+                    warn!(
+                        "display loop stalled for {:.1} s in {step:?}",
+                        stalled.as_secs_f32()
+                    );
+                    reported = Some(since);
+                }
+                if should_exit.load(Ordering::Relaxed)
+                    && exit_seen.get_or_insert_with(Instant::now).elapsed() > EXIT_GRACE
+                {
+                    warn!(
+                        "the activity is gone and the display loop is stuck in {step:?}; \
+                         ending the process so the next launch starts clean"
+                    );
+                    std::process::exit(0);
+                }
+            }
+        })
+        .expect("watchdog thread");
+}
 
 /// Who a vision is, and where its files are.
 pub struct Config {
@@ -588,10 +694,12 @@ impl<V: Vision> Shell<V> {
     }
 
     fn render(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder) {
+        enter(Step::BeginFrame);
         let output = if self.passthrough.is_some() {
             let Some(frame) = context.xr_begin_frame() else {
                 return;
             };
+            enter(Step::AcquireImage);
             let Some(image) = self.surface.acquire_image() else {
                 // The frame has begun, so it ends, with nothing in it.
                 let _ = context.xr_end_frame(frame, gpu::xr::BlendMode::Opaque, &[]);
@@ -604,9 +712,11 @@ impl<V: Vision> Shell<V> {
             };
             Output::Presented(frame)
         };
+        enter(Step::WaitPrevious);
         if let Some(sync) = self.last_submit.take() {
-            let _ = context.wait_for(&sync, !0);
+            wait_gpu(context, &sync, "the previous frame");
         }
+        enter(Step::Sense);
         // The previous frame's resample has run, so its result is ready.
         let mut environment_changed = false;
         if let Some(depth) = self.resample.read() {
@@ -741,6 +851,7 @@ impl<V: Vision> Shell<V> {
             speaking,
             rates: self.rates,
         };
+        enter(Step::Update);
         let started = Instant::now();
         self.vision.update(context, encoder, &senses);
         let ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -760,6 +871,7 @@ impl<V: Vision> Shell<V> {
         } else {
             gpu::TextureColor::OpaqueBlack
         };
+        enter(Step::Draw);
         let extent = self.surface.extent();
         for &(ref xr_view, view) in &views {
             let fov = [
@@ -804,7 +916,9 @@ impl<V: Vision> Shell<V> {
                 self.vision.after_submit(&sync);
                 // The image goes back to the runtime once it is rendered,
                 // before the frame that shows it ends.
-                let _ = context.wait_for(&sync, !0);
+                enter(Step::WaitRendered);
+                wait_gpu(context, &sync, "this frame");
+                enter(Step::EndFrame);
                 self.surface.release_image();
                 let passthrough = self.passthrough.as_ref().expect("layered output");
                 let layers = [
@@ -874,7 +988,7 @@ impl<V: Vision> Shell<V> {
         drop(self.depth.take());
         drop(self.listener.take());
         if let Some(sync) = self.last_submit.take() {
-            let _ = context.wait_for(&sync, !0);
+            wait_gpu(context, &sync, "the last frame");
         }
         // Its layer belongs to the session, which ends after this.
         drop(self.passthrough.take());
@@ -932,19 +1046,34 @@ pub fn run<V: Vision>() {
     extensions.fb_passthrough = available.fb_passthrough;
     extensions.meta_environment_depth = available.meta_environment_depth;
 
-    let xr_instance = entry
-        .create_instance(
-            &xr::ApplicationInfo {
-                application_name: config.name,
-                application_version: 0,
-                engine_name: "Blade",
-                engine_version: 0,
-                api_version: xr::Version::new(1, 0, 0),
-            },
-            &extensions,
-            &[],
-        )
-        .unwrap();
+    let instance = entry.create_instance(
+        &xr::ApplicationInfo {
+            application_name: config.name,
+            application_version: 0,
+            engine_name: "Blade",
+            engine_version: 0,
+            api_version: xr::Version::new(1, 0, 0),
+        },
+        &extensions,
+        &[],
+    );
+    let xr_instance = match instance {
+        Ok(instance) => instance,
+        Err(e) => {
+            // One instance per process. Android may start the activity
+            // again in a process whose earlier run never let go of it; that
+            // process cannot recover, the next one can.
+            log::error!(
+                "OpenXR instance: {e}{}; ending the process so the next launch starts clean",
+                if e == xr::sys::Result::ERROR_LIMIT_REACHED {
+                    " (an earlier run in this process still holds one)"
+                } else {
+                    ""
+                }
+            );
+            std::process::exit(1);
+        }
+    };
     let system = xr_instance
         .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
         .unwrap();
@@ -964,6 +1093,7 @@ pub fn run<V: Vision>() {
 
     let mut shell: Option<Shell<V>> = None;
     let should_exit = spawn_event_pump();
+    spawn_watchdog(Arc::clone(&should_exit));
     let mut events = xr::EventDataBuffer::new();
 
     'main: loop {
@@ -971,6 +1101,7 @@ pub fn run<V: Vision>() {
             break 'main;
         }
 
+        enter(Step::Events);
         while let Some(event) = xr_instance.poll_event(&mut events).unwrap() {
             use xr::Event::*;
             match event {
@@ -1011,13 +1142,22 @@ pub fn run<V: Vision>() {
         match &mut shell {
             Some(shell) => shell.render(&context, &mut encoder),
             // Not in session yet; idle rather than spin.
-            None => std::thread::sleep(Duration::from_millis(50)),
+            None => {
+                enter(Step::Idle);
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
     }
 
+    enter(Step::Idle);
     if let Some(shell) = shell.take() {
         shell.destroy(&context);
     }
     context.destroy_command_encoder(&mut encoder);
     info!("=== {} stopped ===", config.name);
+    // Android keeps the process for a quick relaunch and starts the next
+    // run in it, where anything this one left behind (the OpenXR instance,
+    // a model thread mid-dispatch) would stand in its way. A fresh process
+    // costs a second of model loading; a stuck one costs the app.
+    std::process::exit(0);
 }

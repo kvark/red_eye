@@ -20,6 +20,7 @@ pub mod dfine;
 pub mod environment;
 pub mod labels;
 pub mod preprocess;
+pub mod slices;
 pub mod track;
 pub mod worker;
 pub mod yolox;
@@ -67,6 +68,11 @@ impl Rect {
         let inter = ix * iy;
         let union = self.area() + other.area() - inter;
         if union > 0.0 { inter / union } else { 0.0 }
+    }
+
+    /// Whether `point` (normalised image coordinates) is inside.
+    pub fn contains(&self, point: [f32; 2]) -> bool {
+        (0..2).all(|i| self.min[i] <= point[i] && point[i] <= self.max[i])
     }
 
     /// Linear interpolation towards `other`, for smoothing and for drawing

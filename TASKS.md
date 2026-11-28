@@ -15,9 +15,23 @@ but other sessions are working on them.
 
 **Status: done** (Blade #428). The app shows the system's passthrough
 graded by the colour map, with our layer alpha-blended over it, and falls
-back to drawing the camera itself without `XR_FB_passthrough`. Still to
-judge with someone wearing it: whether the colour map wants linear or
-sRGB values (`/data/local/tmp/red_eye/lut_linear` switches).
+back to drawing the camera itself without `XR_FB_passthrough`. Worn, a dark
+room came out almost black: the T1 grade's black point (12% luminance)
+swallowed a dim room whole. Two changes made the same room clearly visible
+in a capture:
+- the passthrough has its own preset (`Grade::passthrough`): T1's red and
+  hot highlights, with a low black point, shadows lifted (gamma 0.9) and a
+  faint red floor;
+- the grade follows the room's light (`Grade::exposure_gain`): the
+  camera's median sets an input gain of up to 4×, applied by lowering the
+  levels, and the colour map is resent when the gain moves by 5%. The
+  median, because a lamp held the bright end up. The camera is
+  auto-exposed, so it understates the dark (about 1.9× in that room); the
+  log's `exposure` shows the gain.
+
+Still to judge with someone wearing it: the look in a lit room, and whether
+the colour map wants linear or sRGB values
+(`/data/local/tmp/red_eye/lut_linear` switches).
 
 The system's own passthrough, graded by the 256-entry colour map that
 `Grade::mono_to_rgba_lut` already produces, is stereo-correct, at display
@@ -38,6 +52,17 @@ mono, narrower than passthrough, and competing with inference for the GPU.
 **Status: done** on the host. D-FINE-N (42.8 AP, ONNX import) is preferred,
 YOLOX-Nano (25.8 AP, hand-built graph) is the fallback. Both are COCO-80
 and Apache-2.0, and both match onnxruntime.
+
+Worn, the view flickered between objects. Three causes, three fixes in
+`perception::track`:
+- a track was dropped when the detector changed its mind about the class;
+  now it matches across classes at a closer overlap, and its label follows
+  a decaying vote;
+- one missed frame unconfirmed a track; now confirmed tracks coast through
+  three;
+- the outlined object was re-chosen every frame; now `FocusLock` switches
+  only after another object has held the focus for three detections, or
+  at once when the current one is lost or the focus leaves it.
 
 Measured on a Quest 3S (technology.md, Frame budget): YOLOX-Nano runs at
 18–20 Hz with the display at 68–71 Hz. D-FINE-N takes 123 ms of GPU time
@@ -155,7 +180,7 @@ bump (Meganeura #399) to land.
   are placed on follows the outlined object, which removes the
   camera-to-eye parallax for it.
   Next:
-  - confirm the encoding and row order on the device;
+  - encoding and row order: confirmed by wearing it;
   - use the head pose at capture time (`Context::xr_time_ago`) rather than
     at display time, since the head moves in the ~75 ms between;
   - scale Depth Anything's contours to metres with it.
@@ -174,18 +199,37 @@ target's crop if whole-frame depth is too coarse.
 Uses: size assessment (M5), world-space targets and lock prediction (M3),
 and the wireframe.
 
-## 6. Wireframe: depth contours inside masks
+## 6. Wireframe: horizontal slices inside masks
 
-**Status: working on the demo photo** (`examples/hud.rs` with a depth
-model) and wired into the XR app, not yet seen on the headset. Masks come
+**Status: slices working on the demo photo** (`examples/hud.rs` with a
+depth model) and in the XR app, not yet seen on the headset. Worn, depth
+contours did not read as the films' traced objects. What they show is an
+outline with the edges of horizontal cuts across the object, as if it were
+sliced and you looked at each slice's outer line. Those edges are lines of
+equal height in the world, so the wireframe now contours height instead of
+depth (`perception::slices`):
+- each pixel's height comes from its camera ray and its depth, with the
+  head's pose keeping the slices level with gravity;
+- Depth Anything gives the shape, scaled to metres by a fit to the
+  headset's depth: inverse depth, least squares, outliers dropped. The fit
+  is made over the whole image, because a fit over one object swung its
+  scale tenfold between frames. It is smoothed across depth frames, and
+  anchored to the headset's range for the object itself;
+- without the headset's depth, the object is taken as flat at the
+  placement plane, which gives straight level lines;
+- about a dozen slices span the object, 2 to 15 cm apart, drifting slowly
+  upward.
+
+Masks still come
 from the detector's boxes cut by depth (`dense::silhouettes`): within each
 box, the pixels nearer than its median. That follows the object's outline
 where it stands in front of its background, but takes in whatever stands
 in front of it too (the dog, in the bicycle's box). Item 4's instance masks
 replace it when they land.
 
-Decision: lines of constant depth inside every mask the segmentation
-network produces, whatever its classes, plus the mask outline. There is no
+Earlier decision, superseded by the slices above: lines of constant depth
+inside every mask the segmentation network produces, plus the mask
+outline. There is no
 split into body parts and no lifted 3D mesh. The films trace subject
 outlines, and T2 draws a triangulated mesh in the smile analysis. Contours
 that wrap around a shape read the same way, and they tolerate coarse depth,

@@ -46,9 +46,9 @@ checked before a decision depends on it.
   for views near the eyes. `perception::environment` resamples it to 160²
   per eye on the GPU, reads it back a frame later and ranges objects
   through the camera's rays. Decoded as OpenGL depth, it reads about 1 m to
-  the chair in front of a headset on a desk. The decoding and the row order
-  are still to be confirmed against the camera (`tools/env_depth.py`, and
-  the app's "agrees with the camera" log line).
+  the chair in front of a headset on a desk. Worn, its ranges were right
+  and the image the right way up (rows top to bottom); `tools/env_depth.py`
+  checks a dump's decoding.
 - **Hand tracking** for input (pinch, punch-to-damage). No controllers are
   required.
 

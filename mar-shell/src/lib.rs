@@ -39,7 +39,7 @@ use mar_core::perception::Detector;
 use mar_core::perception::dense::DepthMap;
 use mar_core::perception::depth::DepthAnything;
 use mar_core::perception::dfine::Dfine;
-use mar_core::perception::environment::{self, DepthView, EnvironmentDepth, Resample};
+use mar_core::perception::environment::{DepthView, EnvironmentDepth, Resample};
 use mar_core::perception::track::{Track, TrackerConfig};
 use mar_core::perception::worker::{Background, Worker};
 use mar_core::perception::yolox::{Config as YoloxConfig, Yolox};
@@ -110,6 +110,9 @@ pub struct Senses<'a> {
     pub frame: Option<&'a Frame>,
     /// The open camera's model, when Camera2 reports its calibration.
     pub camera: Option<&'a CameraModel>,
+    /// The head's pose in the XR base space, whose `y` points up, as of
+    /// this frame.
+    pub head: Pose,
     /// The latest tracks, and whether they changed this frame.
     pub tracks: &'a [Track],
     pub tracks_changed: bool,
@@ -150,6 +153,13 @@ pub trait Vision: Sized {
 
     /// How the compositor's passthrough shows the world.
     fn passthrough_style(&self) -> gpu::xr::PassthroughStyle;
+
+    /// A new passthrough style, when the vision wants one: polled after
+    /// each [`Vision::update`]. Restyling sends a new colour map to the
+    /// compositor, so it should be occasional.
+    fn restyle_passthrough(&mut self) -> Option<gpu::xr::PassthroughStyle> {
+        None
+    }
 
     /// React to what was sensed and record this frame's uploads. The
     /// previous frame's GPU work has finished, so its buffers are free.
@@ -346,10 +356,24 @@ fn dump_depth(depth: &EnvironmentDepth, head: &Pose) {
 /// sRGB-encoded values to linear ones, to compare the two in the headset.
 fn create_passthrough(
     context: &gpu::Context,
-    mut style: gpu::xr::PassthroughStyle,
+    style: gpu::xr::PassthroughStyle,
     dir: &Path,
 ) -> Option<gpu::xr::Passthrough> {
     let linear = dir.join("lut_linear").exists();
+    let passthrough = context.create_xr_passthrough(&encode_style(style, linear));
+    match passthrough {
+        Some(_) => info!(
+            "compositor passthrough, colour map {}",
+            if linear { "linearized" } else { "as encoded" }
+        ),
+        None => warn!("no compositor passthrough; the vision draws the camera image"),
+    }
+    passthrough
+}
+
+/// `style` as the compositor takes it: a mono-to-RGBA map converted to
+/// linear values when `linear`.
+fn encode_style(mut style: gpu::xr::PassthroughStyle, linear: bool) -> gpu::xr::PassthroughStyle {
     if let (true, gpu::xr::PassthroughColorMap::MonoToRgba(lut)) = (linear, &mut style.color_map) {
         let to_linear = |c: f32| {
             if c <= 0.04045 {
@@ -364,15 +388,7 @@ fn create_passthrough(
             }
         }
     }
-    let passthrough = context.create_xr_passthrough(&style);
-    match passthrough {
-        Some(_) => info!(
-            "compositor passthrough, colour map {}",
-            if linear { "linearized" } else { "as encoded" }
-        ),
-        None => warn!("no compositor passthrough; the vision draws the camera image"),
-    }
-    passthrough
+    style
 }
 
 fn is_srgb(format: gpu::TextureFormat) -> bool {
@@ -433,6 +449,9 @@ struct Shell<V> {
     /// The previous submission, waited on before its buffers are reused.
     last_submit: Option<gpu::SyncPoint>,
     frames: u64,
+    /// Time in the vision's update since the last report: total and worst,
+    /// in milliseconds. The update runs on the display thread.
+    update_ms: (f32, f32),
     last_report: Instant,
 }
 
@@ -495,6 +514,7 @@ impl<V: Vision> Shell<V> {
             start: Instant::now(),
             last_submit: None,
             frames: 0,
+            update_ms: (0.0, 0.0),
             last_report: Instant::now(),
             data_dir,
             package: config.package,
@@ -710,6 +730,7 @@ impl<V: Vision> Shell<V> {
             passthrough: layered,
             frame: camera_frame,
             camera: self.camera_model.as_ref(),
+            head,
             tracks: &self.tracks,
             tracks_changed,
             depth: self.depth_map.as_ref(),
@@ -720,7 +741,18 @@ impl<V: Vision> Shell<V> {
             speaking,
             rates: self.rates,
         };
+        let started = Instant::now();
         self.vision.update(context, encoder, &senses);
+        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        self.update_ms = (self.update_ms.0 + ms, self.update_ms.1.max(ms));
+        if let Some(style) = self.vision.restyle_passthrough()
+            && let Some(ref passthrough) = self.passthrough
+        {
+            let linear = self.data_dir.join("lut_linear").exists();
+            if let Err(e) = passthrough.set_style(&encode_style(style, linear)) {
+                warn!("passthrough restyle: {e}");
+            }
+        }
 
         // Under passthrough, clear to nothing so the world shows through.
         let clear = if layered {
@@ -808,6 +840,8 @@ impl<V: Vision> Shell<V> {
         self.rates.render_hz = (self.frames as f64 / secs) as f32;
         self.rates.detect_hz = (self.detections as f64 / secs) as f32;
         self.rates.depth_hz = (self.depths as f64 / secs) as f32;
+        let frames = self.frames.max(1) as f32;
+        let (update_total, update_worst) = std::mem::take(&mut self.update_ms);
         (self.frames, self.detections, self.depths) = (0, 0, 0);
         self.last_report = Instant::now();
         self.reports += 1;
@@ -819,25 +853,16 @@ impl<V: Vision> Shell<V> {
             let direction = projection::rotate(head.orientation, [0.0, 0.0, -1.0]);
             depth.along(0, head.position, direction)
         });
-        // Which way up the depth image is, judged by the camera.
-        if let (Some((depth, head)), Some(camera), Some(relative)) =
-            (&self.environment_depth, &self.camera_model, &self.depth_map)
-        {
-            let agree = |d: &EnvironmentDepth| environment::agreement(d, camera, head, relative);
-            info!(
-                "environment depth agrees with the camera: rows top-down {:.2?}, bottom-up {:.2?}",
-                agree(depth),
-                agree(&depth.flipped())
-            );
-        }
         let r = self.rates;
         info!(
             "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | depth {:.1} Hz | \
-             ahead {ahead:.2?} m | {}",
+             ahead {ahead:.2?} m | update {:.1} ms, worst {:.1} | {}",
             r.render_hz,
             r.detect_hz,
             r.detect_latency_ms,
             r.depth_hz,
+            update_total / frames,
+            update_worst,
             self.vision.status(),
         );
     }

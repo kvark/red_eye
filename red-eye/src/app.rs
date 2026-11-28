@@ -1,5 +1,6 @@
 //! RedEye in the MAR shell: the red grade, the T-800 HUD, targeting by
-//! voice, and objects outlined, ranged and placed at their depth.
+//! voice, and the object in focus outlined and sliced, ranged and placed at
+//! its depth.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,10 +11,11 @@ use blade_graphics as gpu;
 use log::warn;
 use mar_core::grade::Grade;
 use mar_core::hud::canvas::Canvas;
+use mar_core::perception::Label;
 use mar_core::perception::dense::{self, Mask};
 use mar_core::perception::environment;
-use mar_core::perception::track::{self, Track};
-use mar_core::perception::{Label, Rect};
+use mar_core::perception::slices;
+use mar_core::perception::track::{FocusLock, Track};
 use mar_core::render::{BoxInstance, BoxPass, GradePass, WireframePass, WireframeStyle};
 use mar_core::voice::Command;
 use mar_shell::{CAPTURE_SIZE, Config, EyeView, Senses, Vision};
@@ -36,11 +38,21 @@ const PLACEMENT_RANGE: std::ops::RangeInclusive<f32> = 0.3..=6.0;
 /// noisy at object edges, and a plane that jumps shakes every overlay.
 const RANGE_SMOOTHING: f32 = 0.3;
 
-/// Resolution of the silhouette mask the wireframe outlines.
+/// Resolution of the silhouette mask the wireframe outlines, and of the
+/// height field it slices.
 const MASK_SIZE: [u32; 2] = [320, 240];
 
-/// Contour lines across the depth range of what is outlined.
-const CONTOURS: f32 = 8.0;
+/// The grid of headset depth samples the slices' metric depth is fitted
+/// to, over the whole camera image, and how far each new fit moves the one
+/// in use.
+const FIT_GRID: [u32; 2] = [16, 12];
+const FIT_SMOOTHING: f32 = 0.5;
+
+/// How often the camera's brightness is checked for exposure, how much of
+/// a change each check makes, and the change worth a new colour map.
+const EXPOSURE_INTERVAL: Duration = Duration::from_millis(500);
+const EXPOSURE_SMOOTHING: f32 = 0.3;
+const EXPOSURE_STEP: f32 = 0.05;
 
 /// Frames a track must be seen in before it is outlined.
 const CONFIRM_HITS: u32 = 2;
@@ -94,11 +106,25 @@ pub struct RedEye {
     last_target_poll: Instant,
     /// The HUD's clock, as of the last update.
     time: f32,
+    /// Which object the wearer attends to, held steady.
+    focus: FocusLock,
+    /// Depth Anything's relative depth scaled to metres over the outlined
+    /// object, as last fitted to the headset's depth.
+    fit: Option<slices::InverseFit>,
+    /// The input gain the passthrough colour map was last made with, the
+    /// gain it is heading for, and when the camera was last checked.
+    exposure: f32,
+    exposure_target: f32,
+    last_exposure: Instant,
+    restyle: bool,
+    /// The outlined object's metric depth range as last sliced, for the
+    /// log.
+    sliced_depth: Option<(f32, f32)>,
 }
 
 impl RedEye {
     /// The object the HUD is about: the matched target when there is one,
-    /// else the one the wearer faces.
+    /// else the one the wearer attends to.
     fn outlined<'a>(&self, senses: &Senses<'a>) -> Option<&'a Track> {
         let tracks = senses.tracks;
         if let Phase::Match { track, .. } = self.hud.targeting.phase()
@@ -106,12 +132,33 @@ impl RedEye {
         {
             return Some(target);
         }
-        // Without eye tracking, the wearer's focus is where the head points.
-        let focus = senses
-            .camera
-            .and_then(|camera| camera.focus(self.placement_distance))
-            .unwrap_or([0.5, 0.5]);
-        track::focused(tracks, focus, CONFIRM_HITS)
+        let current = self.focus.current()?;
+        tracks.iter().find(|t| t.id == current)
+    }
+
+    /// The grade as the room's light wants it.
+    fn exposed_grade(&self) -> Grade {
+        self.grade.exposed(self.exposure)
+    }
+
+    /// Brighten or darken the grade with the room: in a dim one the
+    /// passthrough's input sits under the grade's black point, and the
+    /// world goes black. The camera's image stands in for the passthrough's,
+    /// which the app cannot see.
+    fn update_exposure(&mut self, senses: &Senses) {
+        let Some(frame) = senses.frame else {
+            return;
+        };
+        if self.last_exposure.elapsed() < EXPOSURE_INTERVAL {
+            return;
+        }
+        self.last_exposure = Instant::now();
+        let wanted = self.grade.exposure_gain(frame.luma());
+        self.exposure_target += EXPOSURE_SMOOTHING * (wanted - self.exposure_target);
+        if (self.exposure_target / self.exposure - 1.0).abs() > EXPOSURE_STEP {
+            self.exposure = self.exposure_target;
+            self.restyle = true;
+        }
     }
 
     /// Range every confirmed track through the headset's depth, and move
@@ -151,34 +198,83 @@ impl RedEye {
         }
     }
 
-    /// Outline one object: the matched target when there is one, else the
-    /// one the wearer faces. Contours on everything at once read as noise,
-    /// and the wireframe is the HUD saying "this one". Its silhouette is cut
-    /// from its box by depth, and the contours spaced over its depth range.
+    /// Trace one object: the matched target when there is one, else the
+    /// one the wearer attends to. Its outline, and the edges of horizontal
+    /// slices through it ([`slices`]): the films' traced objects. Its
+    /// silhouette is cut from its box by depth; the slices are lines of
+    /// equal height in the world, from Depth Anything's shape scaled to
+    /// metres by the headset's depth.
     fn update_wireframe(
         &mut self,
         context: &gpu::Context,
         encoder: &mut gpu::CommandEncoder,
         senses: &Senses,
     ) {
-        let Some(depth) = senses.depth else {
+        let (Some(relative), Some(camera)) = (senses.depth, senses.camera) else {
             return;
         };
-        let boxes: Vec<(u8, Rect)> = self
-            .outlined(senses)
-            .map(|t| (1, t.rect))
-            .into_iter()
-            .collect();
-        let mask: Mask = dense::silhouettes(&boxes, depth, MASK_SIZE[0], MASK_SIZE[1]);
-        let Some((lo, hi)) = dense::masked_range(&mask, depth) else {
+        let Some(outlined) = self.outlined(senses) else {
             self.wireframe_style = None;
             return;
         };
-        self.wireframe.upload(context, encoder, &mask, depth);
+        let rect = outlined.rect;
+        let mask: Mask = dense::silhouettes(&[(1, rect)], relative, MASK_SIZE[0], MASK_SIZE[1]);
+        // A new depth frame gets a new fit to metres, smoothed into the last.
+        if senses.depth_changed
+            && let Some((environment, depth_head)) = senses.environment
+            && let Some(fit) = slices::calibrate(
+                environment,
+                camera,
+                depth_head,
+                relative,
+                FIT_GRID[0],
+                FIT_GRID[1],
+            )
+        {
+            self.fit = Some(match self.fit {
+                Some(old) => old.blend(&fit, FIT_SMOOTHING),
+                None => fit,
+            });
+        }
+        // Without the headset's depth, a flat object at the placement
+        // plane: level lines still, if straight.
+        let flat = self.placement_distance;
+        // The fit's shape, at the distance the headset ranges the object
+        // at (the placement plane follows it).
+        let fit = self
+            .fit
+            .zip(dense::masked_median(&mask, relative))
+            .map(|(fit, r)| {
+                if senses.environment.is_some() {
+                    fit.anchored(r, self.placement_distance)
+                } else {
+                    fit
+                }
+            });
+        let depth = |r: f32| match fit {
+            Some(fit) => fit.depth(r),
+            None => Some(flat),
+        };
+        let heights = slices::heights(
+            camera,
+            &senses.head,
+            relative,
+            depth,
+            rect,
+            MASK_SIZE[0],
+            MASK_SIZE[1],
+        );
+        self.sliced_depth = dense::masked_range(&mask, relative)
+            .and_then(|(near, far)| Some((depth(far)?, depth(near)?)));
+        let Some((lo, hi)) = dense::masked_range(&mask, &heights) else {
+            self.wireframe_style = None;
+            return;
+        };
+        self.wireframe.upload(context, encoder, &mask, &heights);
         self.wireframe_style = Some(WireframeStyle {
-            spacing: ((hi - lo) / CONTOURS).max(1e-3),
-            // A slow drift, for the scanning look.
-            phase: (senses.time * 0.25).fract(),
+            spacing: slices::spacing(hi - lo),
+            // The slices rise slowly through the object, as a scan would.
+            phase: -(senses.time * 0.15).fract(),
             highlight: 1,
             ..WireframeStyle::default()
         });
@@ -197,7 +293,7 @@ impl Vision for RedEye {
 
     fn new(context: &Arc<gpu::Context>, format: gpu::TextureFormat) -> Self {
         Self {
-            grade: Grade::default(),
+            grade: Grade::passthrough(),
             grade_pass: GradePass::new(context, format, CAPTURE_SIZE),
             box_pass: BoxPass::new(context, format),
             wireframe: WireframePass::new(context, format),
@@ -211,6 +307,13 @@ impl Vision for RedEye {
             target_file: None,
             last_target_poll: Instant::now() - TARGET_POLL,
             time: 0.0,
+            focus: FocusLock::default(),
+            fit: None,
+            exposure: 1.0,
+            exposure_target: 1.0,
+            last_exposure: Instant::now(),
+            restyle: false,
+            sliced_depth: None,
         }
     }
 
@@ -221,7 +324,7 @@ impl Vision for RedEye {
             opacity: 1.0,
             edge_color: [0.0; 4],
             color_map: gpu::xr::PassthroughColorMap::MonoToRgba(Box::new(
-                self.grade.mono_to_rgba_lut(),
+                self.exposed_grade().mono_to_rgba_lut(),
             )),
         }
     }
@@ -240,7 +343,15 @@ impl Vision for RedEye {
         {
             self.grade_pass.upload(context, encoder, frame);
         }
+        self.update_exposure(senses);
         if senses.tracks_changed {
+            // Without eye tracking, the wearer's focus is where the head
+            // points.
+            let focus = senses
+                .camera
+                .and_then(|camera| camera.focus(self.placement_distance))
+                .unwrap_or([0.5, 0.5]);
+            self.focus.update(senses.tracks, focus, CONFIRM_HITS);
             // Debug boxes only while scanning everything; a named target
             // gets the HUD's brackets instead.
             let boxes: Vec<_> = if self.hud.targeting.target().is_some() {
@@ -300,13 +411,9 @@ impl Vision for RedEye {
 
     fn draw(&mut self, pass: &mut gpu::RenderCommandEncoder, eye: &EyeView) {
         if !eye.passthrough {
-            self.grade_pass.draw(
-                pass,
-                &self.grade,
-                eye.placement,
-                self.time,
-                eye.linear_target,
-            );
+            let grade = self.exposed_grade();
+            self.grade_pass
+                .draw(pass, &grade, eye.placement, self.time, eye.linear_target);
         }
         self.box_pass
             .draw(pass, eye.placement, eye.extent, BOX_THICKNESS);
@@ -319,13 +426,20 @@ impl Vision for RedEye {
             .composite(pass, eye.placement, eye.linear_target, 1.0);
     }
 
+    fn restyle_passthrough(&mut self) -> Option<gpu::xr::PassthroughStyle> {
+        std::mem::take(&mut self.restyle).then(|| self.passthrough_style())
+    }
+
     fn after_submit(&mut self, sync: &gpu::SyncPoint) {
         self.hud_canvas.after_submit(sync);
     }
 
     fn status(&self) -> String {
         format!(
-            "plane {:.2} m, ranges {:.1?} | {:?}",
+            "exposure {:.2}, fit {:.3?}, sliced depth {:.2?} m, plane {:.2} m, ranges {:.1?} | {:?}",
+            self.exposure,
+            self.fit.map(|f| (f.scale, f.offset)),
+            self.sliced_depth,
             self.placement_distance,
             self.hud.ranges.values().collect::<Vec<_>>(),
             self.hud.targeting.phase()

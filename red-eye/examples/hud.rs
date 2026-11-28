@@ -9,10 +9,66 @@
 //! `hud-match.png` (MATCH typing out) and `hud-locked.png` (settled). A
 //! `.onnx` model runs D-FINE (prepared at 640×480), a `.safetensors` one
 //! YOLOX-Nano. With a depth model (`tools/fetch_depth.sh 224 168`), the
-//! tracks are cut out of their boxes by depth and drawn as a wireframe of
-//! depth contours under the HUD.
+//! tracks are cut out of their boxes by depth and traced under the HUD: an
+//! outline, and horizontal slices across the shape. A photo has no camera
+//! calibration or metric depth, so the slices assume a level camera at eye
+//! height with a 70° view, and the outlined objects about 3 m away.
 
 use std::path::Path;
+
+use mar_core::perception::dense::{DepthMap, Mask};
+use mar_core::perception::slices::{self, InverseFit};
+use mar_core::projection::{CameraModel, Pose};
+
+/// Heights in the world over the photo, for slicing: a level camera at
+/// 1.6 m with a 70° horizontal view, and relative depth scaled so the
+/// masked objects' median sits 3 m away.
+fn heights(frame: &mar_core::frame::Frame, mask: &Mask, relative: &DepthMap) -> DepthMap {
+    let [w, h] = [frame.width as f32, frame.height as f32];
+    let focal = 0.5 * w / 35f32.to_radians().tan();
+    let camera = CameraModel {
+        focal: [focal, focal],
+        principal: [0.5 * w, 0.5 * h],
+        size: [frame.width, frame.height],
+        // Android camera axes (y down, z ahead) onto the head's.
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        position: [0.0; 3],
+    };
+    let head = Pose {
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        position: [0.0, 1.6, 0.0],
+    };
+    let mut inside: Vec<f32> = (0..mask.ids.len())
+        .filter(|&i| mask.ids[i] != 0)
+        .map(|i| {
+            let (x, y) = (i as u32 % mask.width, i as u32 / mask.width);
+            relative.sample(
+                (x as f32 + 0.5) / mask.width as f32,
+                (y as f32 + 0.5) / mask.height as f32,
+            )
+        })
+        .collect();
+    inside.sort_by(f32::total_cmp);
+    let median = inside
+        .get(inside.len() / 2)
+        .copied()
+        .unwrap_or(1.0)
+        .max(1e-3);
+    let fit = InverseFit {
+        scale: 1.0 / (3.0 * median),
+        offset: 0.0,
+    };
+    let everywhere = mar_core::perception::Rect::new(0.0, 0.0, 1.0, 1.0);
+    slices::heights(
+        &camera,
+        &head,
+        relative,
+        |r| fit.depth(r),
+        everywhere,
+        mask.width,
+        mask.height,
+    )
+}
 
 use mar_core::frame::{Eye, Frame};
 use mar_core::grade::Grade;
@@ -109,17 +165,18 @@ fn main() {
             .enumerate()
             .map(|(i, t)| (i as u8 + 1, t.rect))
             .collect();
-        let silhouettes = depth
-            .as_ref()
-            .map(|depth| (dense::silhouettes(&boxes, depth, 320, 240), depth));
-        let mut wire = silhouettes.as_ref().and_then(|(mask, depth)| {
-            let (lo, hi) = dense::masked_range(mask, depth)?;
+        let silhouettes = depth.as_ref().map(|depth| {
+            let mask = dense::silhouettes(&boxes, depth, 320, 240);
+            (heights(&frame, &mask, depth), mask)
+        });
+        let mut wire = silhouettes.as_ref().and_then(|(heights, mask)| {
+            let (lo, hi) = dense::masked_range(mask, heights)?;
             Some(WireframeOverlay {
                 pass: &mut wireframe,
                 mask,
-                depth,
+                depth: heights,
                 style: WireframeStyle {
-                    spacing: ((hi - lo) / 8.0).max(1e-3),
+                    spacing: slices::spacing(hi - lo),
                     highlight: if matched.is_some() { 1 } else { 0 },
                     dim: 1.0,
                     ..WireframeStyle::default()

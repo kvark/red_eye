@@ -119,8 +119,28 @@ pub fn silhouettes(boxes: &[(u8, super::Rect)], depth: &DepthMap, width: u32, he
     mask
 }
 
+/// The median of `depth` over the pixels `mask` marks, or `None` where it
+/// marks none: an object's typical value, unmoved by its edges.
+pub fn masked_median(mask: &Mask, depth: &DepthMap) -> Option<f32> {
+    let mut values: Vec<f32> = (0..mask.ids.len())
+        .filter(|&i| mask.ids[i] != 0)
+        .map(|i| {
+            let (x, y) = (i as u32 % mask.width, i as u32 / mask.width);
+            depth.sample(
+                (x as f32 + 0.5) / mask.width as f32,
+                (y as f32 + 0.5) / mask.height as f32,
+            )
+        })
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    let middle = values.len() / 2;
+    Some(*values.select_nth_unstable_by(middle, f32::total_cmp).1)
+}
+
 /// The range of `depth` over the pixels `mask` marks, or `None` where it
-/// marks none: the span the wireframe's contours divide.
+/// marks none: the span the wireframe's lines divide.
 pub fn masked_range(mask: &Mask, depth: &DepthMap) -> Option<(f32, f32)> {
     let mut range: Option<(f32, f32)> = None;
     for y in 0..mask.height {

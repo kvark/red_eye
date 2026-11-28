@@ -25,6 +25,14 @@
 //! look is designed in. Whether the passthrough colour map is interpreted as
 //! linear or encoded is not documented; check on device.
 
+/// Where [`Grade::exposure_gain`] puts a scene's median, as a share of the
+/// way from the black point to the white: midtones in the middle.
+pub const EXPOSURE_TARGET: f32 = 0.5;
+
+/// The most a dim scene is brightened. Past about four times, the
+/// passthrough cameras' noise in a dark room becomes the picture.
+pub const MAX_EXPOSURE: f32 = 4.0;
+
 /// Parameters of the grade.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Grade {
@@ -101,6 +109,20 @@ impl Grade {
         }
     }
 
+    /// The T1 look for the compositor's passthrough: the same red and hot
+    /// highlights, but blacks barely crushed, shadows lifted by a gamma
+    /// under one, and a faint red floor. The passthrough cameras see a dim
+    /// room dimly, so T1's black point and dark midtones, which hide sensor
+    /// noise in a lit scene, swallow a dark one whole.
+    pub fn passthrough() -> Self {
+        Self {
+            black: 0.03,
+            gamma: 0.9,
+            lift: 0.05,
+            ..Self::t1()
+        }
+    }
+
     /// A failing unit: the T2 grade with strong scanlines and grain.
     /// Temporal artefacts (jitter, flicker, channel split) belong to the
     /// damage mechanic, not to the grade.
@@ -123,6 +145,48 @@ impl Grade {
             scanline_depth: 0.0,
             ..self.clone()
         }
+    }
+
+    /// The grade for input made `gain` times brighter: the levels come
+    /// down by the same factor. A dim room then fills the grade's range
+    /// instead of sinking under its black point, with no change to the
+    /// curve, so [`Grade::map`] stays the one definition.
+    pub fn exposed(&self, gain: f32) -> Self {
+        let gain = gain.max(1e-3);
+        Self {
+            black: self.black / gain,
+            white: self.white / gain,
+            ..self.clone()
+        }
+    }
+
+    /// The gain a camera image of luminance `luma` (8-bit, any layout)
+    /// wants: enough to bring its median to [`EXPOSURE_TARGET`] of the way
+    /// up the grade's levels, never darkening and at most [`MAX_EXPOSURE`].
+    /// The median, not the bright end: a lamp or a window in a dark room
+    /// would hold the bright end up and leave the rest black. Highlights
+    /// clip hot, as the films' do. Every seventh sample is plenty.
+    pub fn exposure_gain(&self, luma: &[u8]) -> f32 {
+        let mut histogram = [0u32; 256];
+        let mut count = 0;
+        for &l in luma.iter().step_by(7) {
+            histogram[l as usize] += 1;
+            count += 1;
+        }
+        if count == 0 {
+            return 1.0;
+        }
+        let mut seen = 0;
+        let median = histogram
+            .iter()
+            .position(|&n| {
+                seen += n;
+                seen * 2 >= count
+            })
+            .unwrap_or(255);
+        let median = (median as f32 + 0.5) / 255.0;
+        let middle = self.black + EXPOSURE_TARGET * (self.white - self.black);
+        (middle / median).clamp(1.0, MAX_EXPOSURE)
     }
 
     /// Graded luminance, `0..=1`: levels, gamma, then lift.
@@ -198,6 +262,51 @@ pub struct GradeUniforms {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passthrough_keeps_a_dim_room_visible() {
+        // What T1 maps to black, the passthrough grade shows as dark red.
+        let dim = 0.08;
+        assert_eq!(Grade::t1().map(dim)[0], 0.0);
+        let shown = Grade::passthrough().map(dim);
+        assert!(shown[0] > 0.1 && shown[0] > 2.0 * shown[1], "{shown:?}");
+        // Nothing is pure black: the floor.
+        assert!(Grade::passthrough().map(0.0)[0] > 0.0);
+    }
+
+    #[test]
+    fn exposure_is_a_gain_on_the_input() {
+        let grade = Grade::t1();
+        let exposed = grade.exposed(3.0);
+        for luma in [0.02f32, 0.05, 0.1, 0.2, 0.3] {
+            let want = grade.map((luma * 3.0).min(1.0));
+            let got = exposed.map(luma);
+            for c in 0..3 {
+                assert!(
+                    (want[c] - got[c]).abs() < 1e-5,
+                    "{luma}: {got:?} vs {want:?}"
+                );
+            }
+        }
+        // A dim pixel that was black is now visible.
+        assert_eq!(grade.map(0.08)[0], 0.0);
+        assert!(exposed.map(0.08)[0] > 0.1);
+    }
+
+    #[test]
+    fn dim_scenes_are_brightened_and_bright_ones_left_alone() {
+        let grade = Grade::t1();
+        // A lit room: values spread to near white.
+        let bright: Vec<u8> = (0..10_000).map(|i| (i % 250) as u8).collect();
+        assert_eq!(grade.exposure_gain(&bright), 1.0);
+        // A dark room: everything under 40 of 255.
+        let dim: Vec<u8> = (0..10_000).map(|i| (i % 40) as u8).collect();
+        let gain = grade.exposure_gain(&dim);
+        assert!(gain > 3.0 && gain <= MAX_EXPOSURE, "{gain}");
+        // Black: as much as allowed, no more.
+        assert_eq!(grade.exposure_gain(&[0u8; 1000]), MAX_EXPOSURE);
+        assert_eq!(grade.exposure_gain(&[]), 1.0);
+    }
 
     fn luminance(c: [f32; 4]) -> f32 {
         0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]

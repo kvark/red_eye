@@ -18,7 +18,7 @@ pub mod targeting;
 pub mod text;
 pub mod view;
 
-pub use view::{Hud, Telemetry};
+pub use view::{Hud, Telemetry, Voice};
 
 /// The mechanics catalogued in `docs/concept.md`, in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

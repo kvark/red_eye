@@ -65,6 +65,11 @@ required = false
 [[package.metadata.android.uses_permission]]
 name = "com.oculus.permission.USE_SCENE"
 
+# Voice commands. A runtime permission: grant it with adb, or the app runs
+# without voice.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+
 [package.metadata.android.application]
 label = "RedEye"
 

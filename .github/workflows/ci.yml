@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install lavapipe
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers espeak-ng
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -32,6 +32,8 @@ jobs:
           tools/fetch_dfine.sh
           tools/fetch_depth.sh
           tools/fetch_depth.sh 224 168
+          espeak-ng -w ref/track_the_bicycle.wav "track the bicycle"
+          tools/fetch_moonshine.sh ref/track_the_bicycle.wav
       - run: cargo test --locked --release -- --include-ignored
       - run: cargo run --locked --release --example preview -- - out
       - run: cargo run --locked --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png

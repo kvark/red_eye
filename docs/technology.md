@@ -230,7 +230,10 @@ Meganeura's own tests (oracle cases on lavapipe; Quest qualification).
      onnx-simplifier.
    - Asymmetric convolution padding, which simplifiers and TensorFlow
      exports produce.
-4. **Voice commands (Moonshine-tiny)**:
+4. **Voice commands (Moonshine-tiny)**: integer inputs and
+   InstanceNormalization are in PR #400, which also fixes GroupNorm on
+   inputs that arrive as rows (it ran no workgroups). Moonshine-tiny now
+   imports with no hand patches. What remains below is for raw exports:
    - `InstanceNormalization`, or `GroupNorm` over 3D input. Moonshine's
      stem normalises one 287k-element row, so a single-row reduction kernel
      must not be slow.

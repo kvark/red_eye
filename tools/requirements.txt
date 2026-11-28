@@ -5,3 +5,4 @@ onnxruntime
 pillow
 safetensors
 onnxsim
+tokenizers

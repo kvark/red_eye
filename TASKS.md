@@ -64,9 +64,19 @@ Next:
 
 ## 3. Voice control: "track the motorcycle"
 
-**Status: ready** on the RedEye side; **blocked** for running the model
-(Meganeura: `InstanceNormalization`, integer graph inputs for the token
-`Gather`).
+**Status: done** on the Quest's model side, and wired into the app
+(`voice`, `android-xr/src/listen.rs`); not yet heard through the headset's
+own microphone. Meganeura PR #400 (integer inputs, InstanceNormalization)
+is pinned by commit until it merges.
+
+On the Quest, from synthesised speech (two Windows voices):
+- every one of 20 commands was right and accepted, at confidence −0.08 to −0.72;
+- "hello there" and "what time is it" were rejected, at −6.1 to −9.3;
+- each utterance took 42–95 ms, the encoder and up to 6 decoder steps.
+
+`voice::MIN_CONFIDENCE` (−1.5) sits in that gap. Still to check with a
+wearer: real voices, room noise, the detector's thresholds, and whether
+the HUD's "VOICE INPUT" line reads well.
 
 Moonshine-tiny (MIT) takes 2 s of raw 16 kHz audio, about 38 ms per
 utterance on the Quest (estimated). Decoding is constrained to the command

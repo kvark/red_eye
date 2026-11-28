@@ -31,6 +31,7 @@ Quest 3: setup, first run, what to measure.
 | `src/perception/dense.rs` | Per-pixel results in camera-image coordinates: instance masks, depth, depth-cut silhouettes |
 | `src/perception/depth.rs` | Depth Anything V2 Small through Meganeura's ONNX importer: relative depth for the wireframe |
 | `src/perception/environment.rs` | The headset's metric depth (`XR_META_environment_depth`): GPU resample, read-back, object ranges |
+| `src/voice/` | Voice commands: utterance detection, Moonshine-tiny through Meganeura's ONNX importer, decoding constrained to the command grammar |
 | `src/projection.rs` | Camera model from Camera2's calibration; placing camera-image overlays into each eye |
 | `src/hud/` | Mechanics as time-driven state; text effects |
 | `src/hud/canvas.rs` | egui laid out once per frame into an offscreen texture, composited per eye |
@@ -52,6 +53,8 @@ Quest 3: setup, first run, what to measure.
 cargo test                                  # unit tests
 pip install -r tools/requirements.txt && tools/fetch_yolox.sh && tools/fetch_dfine.sh   # models and references into ref/
 tools/fetch_depth.sh && tools/fetch_depth.sh 224 168   # Depth Anything V2 Small, normalisation folded in
+tools/fetch_moonshine.sh [track_the_bicycle.wav]   # Moonshine-tiny, 2 s window, and the command grammar
+cargo run --release --example voice -- ref/moonshine_tiny_2s a.wav b.wav   # what each recording commands, and how sure
 cargo test --release -- --include-ignored   # + GPU and detector tests (lavapipe: apt install mesa-vulkan-drivers)
 cargo run --release --example preview -- [image] [out-dir]
 cargo run --release --example detect -- ref/yolox_nano.safetensors ref/dog.jpg out/detect.png
@@ -66,6 +69,9 @@ cargo clippy --target aarch64-linux-android -p red-eye-xr -- -D warnings
 cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
 adb shell pm grant rust.red_eye_xr com.oculus.permission.USE_SCENE   # the headset's depth, for ranges
+adb shell pm grant rust.red_eye_xr android.permission.RECORD_AUDIO   # voice commands
+adb shell mkdir -p /data/local/tmp/red_eye/moonshine/encoder /data/local/tmp/red_eye/moonshine/decoder
+adb push ref/moonshine_tiny_2s/commands.txt /data/local/tmp/red_eye/moonshine/   # and encoder/, decoder/ model.onnx alike
 adb shell mkdir -p /data/local/tmp/red_eye && adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
 adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx   # preferred when present
 adb push ref/depth_small_224x168/model.onnx /data/local/tmp/red_eye/depth_small.onnx   # the wireframe's depth

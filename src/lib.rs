@@ -31,6 +31,7 @@ pub mod perception;
 pub mod projection;
 pub mod render;
 pub mod source;
+pub mod voice;
 
 use std::sync::Arc;
 

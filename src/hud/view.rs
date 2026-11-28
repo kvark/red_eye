@@ -45,9 +45,22 @@ pub struct Hud {
     /// Metres to each track that the headset's depth reaches, as the app
     /// measured them last; tracks without one show no range.
     pub ranges: std::collections::HashMap<TrackId, f32>,
+    pub voice: Voice,
     small: grid::Glyphs,
     large: grid::Glyphs,
 }
+
+/// What the HUD shows of voice commands.
+#[derive(Clone, Debug, Default)]
+pub struct Voice {
+    /// Someone is speaking now.
+    pub speaking: bool,
+    /// The last phrase heard, whether it was acted on, and when (HUD time).
+    pub heard: Option<(String, bool, f32)>,
+}
+
+/// How long a heard phrase stays up.
+const VOICE_SHOWN: f32 = 4.0;
 
 /// Lays text into monospace cells through one grid batch.
 struct Writer<'g> {
@@ -241,6 +254,25 @@ impl Hud {
             );
             // Each line starts once the one above has finished.
             elapsed -= l.chars().count() as f32 / typed.chars_per_second;
+        }
+
+        // Under it, voice: a cue while someone speaks, then what was heard.
+        let voice_at = origin + vec2(0.0, row * 1.2 * (stack.len() as f32 + 0.5));
+        match self.voice.heard {
+            _ if self.voice.speaking => {
+                let dots = ".".repeat(1 + (now * 3.0) as usize % 3);
+                text.write(ui, voice_at, &format!("VOICE INPUT{dots}"), DIM);
+            }
+            Some((ref phrase, accepted, at)) if now - at < VOICE_SHOWN => {
+                let line = if accepted {
+                    format!("VOICE INPUT: {}", phrase.to_uppercase())
+                } else {
+                    "VOICE INPUT: NO MATCH".to_owned()
+                };
+                let typed = Typewriter::new(&line);
+                text.write(ui, voice_at, typed.visible(now - at), TEXT);
+            }
+            _ => {}
         }
 
         // Scanning everything: name each confirmed track over its outline.

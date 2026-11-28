@@ -17,7 +17,7 @@ members = ["android-xr"]
 # `Arc<blade_graphics::Context>` the renderer creates is the type
 # meganeura's `SessionConfig::gpu` accepts. Bump both pins together.
 blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
-meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "63d6758406f3ca3797bce3f9ec606f6e1dbcc3f1", default-features = false }
+meganeura = { version = "0.3", git = "https://github.com/kvark/meganeura", rev = "07f2f51a60e38fc6401ca781082231138dd493e5", default-features = false }
 # The HUD: egui owns fonts and layout, blade-egui paints it, and blade-util's
 # buffer belt feeds the text grid. Same Blade revision as blade-graphics, and
 # the egui version blade-egui is built against.
@@ -54,4 +54,5 @@ path = "examples/onnx_check.rs"
 [[example]]
 name = "hud"
 path = "examples/hud.rs"
+
 

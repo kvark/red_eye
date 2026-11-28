@@ -28,6 +28,8 @@
 #![cfg(target_os = "android")]
 
 mod camera;
+mod listen;
+mod microphone;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +56,7 @@ use red_eye::perception::yolox::{Config, Yolox};
 use red_eye::projection::{self, CameraModel, Pose};
 use red_eye::render::{BoxInstance, BoxPass, GradePass, Placement, WireframePass, WireframeStyle};
 use red_eye::source::{FrameSource, TestPattern};
+use red_eye::voice::Command;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const CAPTURE_SIZE: (i32, i32) = (1280, 960);
@@ -128,17 +131,28 @@ const BOX_THICKNESS: f32 = 3.0;
 const TARGET_PATH: &str = "/data/local/tmp/red_eye/target";
 const TARGET_POLL: Duration = Duration::from_secs(1);
 
+/// Moonshine-tiny and the command grammar, prepared by
+/// `tools/fetch_moonshine.sh` and pushed with `adb`.
+const VOICE_DIR: &str = "/data/local/tmp/red_eye/moonshine";
+
 /// The HUD canvas covers the camera image at its own resolution, laid out
 /// at one pixel per point.
 const HUD_SIZE: [u32; 2] = [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32];
 
-fn read_target() -> Option<Label> {
-    let name = std::fs::read_to_string(TARGET_PATH).ok()?;
+/// The target file's contents, when they differ from `last`: the file is
+/// a fallback beside voice, so it only names a target when it changes, and
+/// does not undo what was said since.
+fn read_target(last: &mut Option<String>) -> Option<Option<Label>> {
+    let name = std::fs::read_to_string(TARGET_PATH).unwrap_or_default();
+    if last.as_deref() == Some(name.as_str()) {
+        return None;
+    }
     let label = Label::from_name(&name);
     if label.is_none() && !name.trim().is_empty() {
         warn!("{TARGET_PATH}: {:?} is not a COCO class", name.trim());
     }
-    label
+    *last = Some(name);
+    Some(label)
 }
 
 fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
@@ -373,6 +387,11 @@ struct App {
     box_pass: BoxPass,
     wireframe: WireframePass,
     depth: Option<Background<DepthMap>>,
+    /// Voice commands, if the model was pushed.
+    listener: Option<listen::Listener>,
+    heard_generation: u64,
+    /// What the target file last said.
+    target_file: Option<String>,
     depth_map: Option<DepthMap>,
     depth_generation: u64,
     last_depth: Instant,
@@ -446,6 +465,9 @@ impl App {
             box_pass: BoxPass::new(context, format),
             wireframe: WireframePass::new(context, format),
             depth: spawn_depth(context),
+            listener: listen::Listener::spawn(std::path::Path::new(VOICE_DIR), context),
+            heard_generation: 0,
+            target_file: None,
             depth_map: None,
             depth_generation: 0,
             last_depth: Instant::now(),
@@ -509,6 +531,10 @@ impl App {
             return;
         }
         self.camera_active = active;
+        // The microphone, like the camera, only while focused.
+        if let Some(ref listener) = self.listener {
+            listener.set_listening(active);
+        }
         // Passthrough's cameras stop with ours: nothing to show unfocused.
         if let Some(ref passthrough) = self.passthrough {
             let result = if active {
@@ -703,7 +729,24 @@ impl App {
         let time = self.start.elapsed().as_secs_f32();
         if self.last_target_poll.elapsed() >= TARGET_POLL {
             self.last_target_poll = Instant::now();
-            self.hud.set_target(read_target(), time);
+            if let Some(target) = read_target(&mut self.target_file) {
+                self.hud.set_target(target, time);
+            }
+        }
+        if let Some(ref listener) = self.listener {
+            self.hud.voice.speaking = listener.speaking();
+            if listener.generation() != self.heard_generation
+                && let Some(heard) = listener.latest()
+            {
+                self.heard_generation = listener.generation();
+                if heard.accepted {
+                    match heard.recognition.command {
+                        Command::Track(label) => self.hud.set_target(Some(label), time),
+                        Command::Cancel => self.hud.set_target(None, time),
+                    }
+                }
+                self.hud.voice.heard = Some((heard.recognition.phrase, heard.accepted, time));
+            }
         }
         // Lay out the HUD once; each eye composites it.
         let telemetry = Telemetry {
@@ -925,6 +968,7 @@ impl App {
         // Join the worker first: it holds the context and may be mid-submit.
         drop(self.detector.take());
         drop(self.depth.take());
+        drop(self.listener.take());
         if let Some(sync) = self.last_submit.take() {
             let _ = context.wait_for(&sync, !0);
         }

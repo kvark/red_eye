@@ -147,6 +147,49 @@ impl Vad {
     }
 }
 
+/// How loud an utterance was, and the gain [`normalize`] gave it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// Root mean square, in dB of full scale.
+    pub rms_db: f32,
+    /// The largest sample, `0..=1`.
+    pub peak: f32,
+    /// Share of samples at full scale: clipping before we got them.
+    pub clipped: f32,
+    pub gain: f32,
+}
+
+/// The level speech is brought to: a clear recording's, about -20 dBFS.
+pub const SPEECH_RMS: f32 = 0.1;
+
+/// The most an utterance is amplified. A quiet microphone (the headset's,
+/// tuned for recognition, applies no gain of its own) comes up to
+/// speech level; silence is not blown up into noise.
+pub const MAX_GAIN: f32 = 30.0;
+
+/// Bring `utterance` to speech level, without clipping, and say how loud
+/// it was. Speech recognisers learn from recordings at roughly one level;
+/// a headset microphone's raw signal sits well below it.
+pub fn normalize(utterance: &mut [f32]) -> Level {
+    let n = utterance.len().max(1) as f32;
+    let rms = (utterance.iter().map(|s| s * s).sum::<f32>() / n).sqrt();
+    let peak = utterance.iter().fold(0.0f32, |p, s| p.max(s.abs()));
+    let clipped = utterance.iter().filter(|s| s.abs() >= 0.999).count() as f32 / n;
+    let gain = (SPEECH_RMS / rms.max(1e-6))
+        .min(MAX_GAIN)
+        .min(0.99 / peak.max(1e-6))
+        .max(1.0);
+    for s in utterance.iter_mut() {
+        *s *= gain;
+    }
+    Level {
+        rms_db: 20.0 * rms.max(1e-9).log10(),
+        peak,
+        clipped,
+        gain,
+    }
+}
+
 /// Resample `input` from `from` Hz to `to` Hz: averaging over each output
 /// sample's span (a box filter against aliasing), then linear. Good enough
 /// for speech from a microphone that will not open at 16 kHz.
@@ -232,6 +275,23 @@ mod tests {
         done.extend(vad.push(&tone(3.0, 0.3)));
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].len(), 100 * FRAME);
+    }
+
+    #[test]
+    fn quiet_speech_comes_up_and_loud_speech_does_not_clip() {
+        let mut quiet = tone(0.5, 0.01);
+        let level = normalize(&mut quiet);
+        assert!((level.rms_db + 43.0).abs() < 1.0, "{level:?}");
+        let rms = (quiet.iter().map(|s| s * s).sum::<f32>() / quiet.len() as f32).sqrt();
+        assert!((rms - SPEECH_RMS).abs() < 0.01, "{rms}");
+        // Already loud: the peak limits the gain.
+        let mut loud = tone(0.5, 0.9);
+        let level = normalize(&mut loud);
+        assert_eq!(level.gain, 1.0);
+        assert!(loud.iter().all(|s| s.abs() <= 0.99));
+        // Silence stays near silence.
+        let mut silence = vec![1e-5; 800];
+        assert_eq!(normalize(&mut silence).gain, MAX_GAIN);
     }
 
     #[test]

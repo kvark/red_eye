@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use blade_graphics as gpu;
 use log::{info, warn};
-use mar_core::voice::{Grammar, MIN_CONFIDENCE, Moonshine, Recognition, Vad, VadConfig};
+use mar_core::voice::{Grammar, MIN_CONFIDENCE, Moonshine, Recognition, Vad, VadConfig, vad};
 
 use crate::microphone::Microphone;
 
@@ -107,6 +107,8 @@ fn run(dir: &Path, context: Arc<gpu::Context>, shared: &Shared) -> Result<(), St
     )?;
     let mut model = Moonshine::new(dir, Some(context))?;
     info!("voice ready: {} command phrases", grammar.phrases());
+    // The switch sits beside the model directory, with the app's others.
+    let debug = dir.parent().unwrap_or(dir).join("voice_debug");
     let mut microphone: Option<Microphone> = None;
     let mut vad = Vad::new(VadConfig::default());
     let mut last_failure: Option<Instant> = None;
@@ -145,9 +147,17 @@ fn run(dir: &Path, context: Arc<gpu::Context>, shared: &Shared) -> Result<(), St
         };
         let utterances = vad.push(&audio);
         shared.speaking.store(vad.speaking(), Ordering::Relaxed);
-        for utterance in utterances {
+        for mut utterance in utterances {
             let start = Instant::now();
+            let level = vad::normalize(&mut utterance);
             model.encode(&utterance);
+            // What the model hears unconstrained, as token ids for the
+            // tokenizer to read back on the host: only with `voice_debug`
+            // in the data directory, since it is a transcript of whatever
+            // was said near the headset.
+            if debug.exists() {
+                info!("voice debug: free decoding {:?}", model.transcribe());
+            }
             let Some(recognition) = model.recognise(&grammar) else {
                 continue;
             };
@@ -157,7 +167,8 @@ fn run(dir: &Path, context: Arc<gpu::Context>, shared: &Shared) -> Result<(), St
                 recognition,
             };
             info!(
-                "heard {:?} ({:.2}, {}) in {:.0} ms",
+                "heard {:?} ({:.2}, {}) in {:.0} ms; {:.2} s at {:.0} dBFS, peak {:.2}, \
+                 clipped {:.1}%, gain {:.1}",
                 heard.recognition.phrase,
                 heard.recognition.confidence,
                 if heard.accepted {
@@ -165,7 +176,12 @@ fn run(dir: &Path, context: Arc<gpu::Context>, shared: &Shared) -> Result<(), St
                 } else {
                     "rejected"
                 },
-                heard.latency_ms
+                heard.latency_ms,
+                utterance.len() as f32 / vad::SAMPLE_RATE as f32,
+                level.rms_db,
+                level.peak,
+                100.0 * level.clipped,
+                level.gain,
             );
             *shared.latest.lock().unwrap() = Some(heard);
             shared.generation.fetch_add(1, Ordering::Release);

@@ -230,6 +230,42 @@ pub fn placement(camera: &CameraModel, eye: &Pose, fov: [f32; 4], distance: f32)
     }
 }
 
+/// Where `rect` (normalised image coordinates) from a frame the camera
+/// took with the head at `from` shows in a frame taken with the head at
+/// `to` (both in the base space), for what stands `distance` metres along
+/// the camera's axis: the bounding box of its corners carried across.
+///
+/// Results from different frames meet this way, such as a track's box
+/// from the newest frame cut out of a depth map half a second older.
+pub fn reproject_rect(
+    camera: &CameraModel,
+    from: &Pose,
+    to: &Pose,
+    rect: crate::perception::Rect,
+    distance: f32,
+) -> crate::perception::Rect {
+    let origin = from.apply(camera.position);
+    let corners = [
+        [rect.min[0], rect.min[1]],
+        [rect.max[0], rect.min[1]],
+        [rect.min[0], rect.max[1]],
+        [rect.max[0], rect.max[1]],
+    ];
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    for corner in corners {
+        let direction = rotate(from.orientation, camera.ray(corner));
+        let point = [0, 1, 2].map(|i| origin[i] + distance * direction[i]);
+        // Behind the camera now: keep the corner where it was.
+        let uv = camera.project(to.inverse_apply(point)).unwrap_or(corner);
+        for a in 0..2 {
+            min[a] = min[a].min(uv[a]);
+            max[a] = max[a].max(uv[a]);
+        }
+    }
+    crate::perception::Rect { min, max }
+}
+
 /// The head's pose from its two eyes' (both in the same frame): midway
 /// between them, turned as the first. Quest eyes look parallel.
 pub fn head_from_eyes(left: &Pose, right: &Pose) -> Pose {
@@ -359,6 +395,35 @@ mod tests {
         let r = camera.ray(uv);
         let back = camera.project(r.map(|v| v * 2.5)).unwrap();
         assert!(close(back, uv, 1e-6), "{back:?}");
+    }
+
+    #[test]
+    fn rects_follow_the_head_between_frames() {
+        let camera = CameraModel {
+            focal: [500.0, 500.0],
+            principal: [320.0, 240.0],
+            size: [640, 480],
+            orientation: FLIP,
+            position: [0.0; 3],
+        };
+        let rect = crate::perception::Rect::new(0.4, 0.4, 0.6, 0.6);
+        let still = Pose::IDENTITY;
+        let same = reproject_rect(&camera, &still, &still, rect, 2.0);
+        assert!(close(same.min, rect.min, 1e-5) && close(same.max, rect.max, 1e-5));
+        // The head turned 5 degrees left since: what was ahead is now to
+        // the right in the image.
+        let yaw = 5.0f32.to_radians();
+        let turned = Pose {
+            orientation: [0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos()],
+            position: [0.0; 3],
+        };
+        let moved = reproject_rect(&camera, &still, &turned, rect, 2.0);
+        let shift = 500.0 * yaw.tan() / 640.0;
+        assert!(
+            (moved.min[0] - (rect.min[0] + shift)).abs() < 0.01,
+            "{moved:?}"
+        );
+        assert!((moved.min[1] - rect.min[1]).abs() < 0.01, "{moved:?}");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use mar_core::perception::dense::{self, Mask};
 use mar_core::perception::environment;
 use mar_core::perception::slices;
 use mar_core::perception::track::{FocusLock, Track};
+use mar_core::projection::{self, Pose};
 use mar_core::render::{BoxInstance, BoxPass, GradePass, WireframePass, WireframeStyle};
 use mar_core::voice::Command;
 use mar_shell::{CAPTURE_SIZE, Config, EyeView, Senses, Vision};
@@ -120,6 +121,11 @@ pub struct RedEye {
     /// The outlined object's metric depth range as last sliced, for the
     /// log.
     sliced_depth: Option<(f32, f32)>,
+    /// The head's pose when the frames behind the boxes and the outline
+    /// were taken: each is drawn from where it was seen, not where the
+    /// head has carried the camera since.
+    tracks_head: Option<Pose>,
+    wire_head: Option<Pose>,
 }
 
 impl RedEye {
@@ -217,8 +223,20 @@ impl RedEye {
             self.wireframe_style = None;
             return;
         };
-        let rect = outlined.rect;
+        // The box is from the newest frame, the depth from an older one:
+        // carry the box to where its object was in the depth's frame.
+        let rect = match (senses.tracks_head, senses.depth_head) {
+            (Some(from), Some(to)) => projection::reproject_rect(
+                camera,
+                &from,
+                &to,
+                outlined.rect,
+                self.placement_distance,
+            ),
+            _ => outlined.rect,
+        };
         let mask: Mask = dense::silhouettes(&[(1, rect)], relative, MASK_SIZE[0], MASK_SIZE[1]);
+        let depth_head = senses.depth_head.unwrap_or(senses.head);
         // A new depth frame gets a new fit to metres, smoothed into the last.
         if senses.depth_changed
             && let Some((environment, depth_head)) = senses.environment
@@ -257,7 +275,7 @@ impl RedEye {
         };
         let heights = slices::heights(
             camera,
-            &senses.head,
+            &depth_head,
             relative,
             depth,
             rect,
@@ -271,6 +289,7 @@ impl RedEye {
             return;
         };
         self.wireframe.upload(context, encoder, &mask, &heights);
+        self.wire_head = senses.depth_head;
         self.wireframe_style = Some(WireframeStyle {
             spacing: slices::spacing(hi - lo),
             // The slices rise slowly through the object, as a scan would.
@@ -314,6 +333,8 @@ impl Vision for RedEye {
             last_exposure: Instant::now(),
             restyle: false,
             sliced_depth: None,
+            tracks_head: None,
+            wire_head: None,
         }
     }
 
@@ -345,6 +366,7 @@ impl Vision for RedEye {
         }
         self.update_exposure(senses);
         if senses.tracks_changed {
+            self.tracks_head = senses.tracks_head;
             // Without eye tracking, the wearer's focus is where the head
             // points.
             let focus = senses
@@ -415,13 +437,16 @@ impl Vision for RedEye {
             self.grade_pass
                 .draw(pass, &grade, eye.placement, self.time, eye.linear_target);
         }
-        self.box_pass
-            .draw(pass, eye.placement, eye.extent, BOX_THICKNESS);
+        // Boxes and the outline where their frames saw their objects.
+        let boxes = eye.place(self.tracks_head.as_ref());
+        self.box_pass.draw(pass, boxes, eye.extent, BOX_THICKNESS);
         if let Some(ref style) = self.wireframe_style {
-            self.wireframe
-                .draw(pass, eye.placement, style, eye.linear_target);
+            let outline = eye.place(self.wire_head.as_ref());
+            self.wireframe.draw(pass, outline, style, eye.linear_target);
         }
-        // Placed like the camera image, so track rectangles line up.
+        // The HUD as of now: its panels hold still with the head, rather
+        // than jumping with each detection. Its labels and brackets trail
+        // their objects by a detection's latency.
         self.hud_canvas
             .composite(pass, eye.placement, eye.linear_target, 1.0);
     }

@@ -27,6 +27,7 @@ mod microphone;
 
 pub use listen::Heard;
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -91,6 +92,41 @@ const STALL: Duration = Duration::from_secs(3);
 /// before the watchdog ends the process. A process left holding the OpenXR
 /// instance makes every later launch fail.
 const EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// Camera frames whose head pose is remembered: about two seconds' worth,
+/// longer than any model takes.
+const CAPTURES_KEPT: usize = 120;
+
+const CLOCK_MONOTONIC: i32 = 1;
+const CLOCK_BOOTTIME: i32 = 7;
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
+}
+
+fn clock_ns(clock: i32) -> i64 {
+    let mut time = Timespec { sec: 0, nsec: 0 };
+    unsafe { clock_gettime(clock, &mut time) };
+    time.sec * 1_000_000_000 + time.nsec
+}
+
+/// How long ago a camera frame stamped `timestamp_ns` was taken. Camera2
+/// stamps frames with the boot-time clock or the monotonic one, depending
+/// on the device, and the two part by the time spent asleep; the one that
+/// gives a plausible age is the camera's.
+fn frame_age(timestamp_ns: i64) -> Option<Duration> {
+    [CLOCK_BOOTTIME, CLOCK_MONOTONIC]
+        .into_iter()
+        .map(|clock| clock_ns(clock) - timestamp_ns)
+        .find(|age| (0..1_000_000_000).contains(age))
+        .map(|age| Duration::from_nanos(age as u64))
+}
 
 /// The steps of the display loop, for the watchdog's report.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -222,10 +258,17 @@ pub struct Senses<'a> {
     /// The latest tracks, and whether they changed this frame.
     pub tracks: &'a [Track],
     pub tracks_changed: bool,
+    /// The head's pose when the frame the tracks come from was taken. The
+    /// head moves while a model runs; drawn placed from this pose
+    /// ([`EyeView::place`]), results stay on their objects.
+    pub tracks_head: Option<Pose>,
     /// Monocular relative depth over the camera image, and whether it
     /// changed this frame.
     pub depth: Option<&'a DepthMap>,
     pub depth_changed: bool,
+    /// The head's pose when the depth's frame was taken: half a second
+    /// old or more, so placing from it matters most.
+    pub depth_head: Option<Pose>,
     /// The headset's metric depth with the head pose it goes with, and
     /// whether it changed this frame.
     pub environment: Option<&'a (EnvironmentDepth, Pose)>,
@@ -240,14 +283,37 @@ pub struct Senses<'a> {
 /// One eye being drawn.
 pub struct EyeView {
     /// Carries the camera image, and anything drawn in its coordinates,
-    /// onto this eye.
+    /// onto this eye, as if taken with the head where it is now.
     pub placement: Placement,
+    /// What [`EyeView::place`] needs: the eye and the head now, in the base
+    /// space; the eye's frustum; the camera; the placement plane's depth.
+    pub eye: Pose,
+    pub head: Pose,
+    pub fov: [f32; 4],
+    pub camera: Option<CameraModel>,
+    pub distance: f32,
     /// The eye buffer's size in pixels.
     pub extent: [u32; 2],
     /// The target encodes sRGB itself, so shaders write linear values.
     pub linear_target: bool,
     /// See [`Senses::passthrough`].
     pub passthrough: bool,
+}
+
+impl EyeView {
+    /// The placement for something drawn in the coordinates of a camera
+    /// frame taken with the head at `captured`: where it was in the world,
+    /// not where the head has carried the camera since. `None` places it
+    /// as of now.
+    pub fn place(&self, captured: Option<&Pose>) -> Placement {
+        let head = captured.unwrap_or(&self.head);
+        match self.camera {
+            Some(ref camera) => {
+                projection::placement(camera, &self.eye.relative_to(head), self.fov, self.distance)
+            }
+            None => eye_placement(self.fov),
+        }
+    }
 }
 
 /// A look at the world: one MAR app.
@@ -335,7 +401,7 @@ fn spawn_detector(dir: &Path, context: &Arc<gpu::Context>) -> Option<Worker> {
 }
 
 /// The depth model on a thread of its own, if it was pushed to the device.
-fn spawn_depth(dir: &Path, context: &Arc<gpu::Context>) -> Option<Background<DepthMap>> {
+fn spawn_depth(dir: &Path, context: &Arc<gpu::Context>) -> Option<Background<(DepthMap, i64)>> {
     let path = dir.join("depth_small.onnx");
     if !path.exists() {
         warn!("no depth model at {}; no monocular depth", path.display());
@@ -349,7 +415,7 @@ fn spawn_depth(dir: &Path, context: &Arc<gpu::Context>) -> Option<Background<Dep
             "depth ready: Depth Anything V2 Small at {}x{}",
             DEPTH_SIZE[0], DEPTH_SIZE[1]
         );
-        Ok(move |frame: &Frame| model.run_frame(frame))
+        Ok(move |frame: &Frame| (model.run_frame(frame), frame.timestamp_ns))
     }))
 }
 
@@ -497,6 +563,16 @@ fn encode_style(mut style: gpu::xr::PassthroughStyle, linear: bool) -> gpu::xr::
     style
 }
 
+/// The head's pose when the frame stamped `timestamp_ns` was taken, among
+/// the remembered `captures`.
+fn captured(captures: &VecDeque<(i64, Pose)>, timestamp_ns: i64) -> Option<Pose> {
+    captures
+        .iter()
+        .rev()
+        .find(|&&(t, _)| t == timestamp_ns)
+        .map(|&(_, pose)| pose)
+}
+
 fn is_srgb(format: gpu::TextureFormat) -> bool {
     matches!(
         format,
@@ -540,8 +616,16 @@ struct Shell<V> {
     shown_generation: u64,
     tracks: Vec<Track>,
     detections: u64,
-    depth: Option<Background<DepthMap>>,
+    depth: Option<Background<(DepthMap, i64)>>,
     depth_map: Option<DepthMap>,
+    depth_head: Option<Pose>,
+    tracks_head: Option<Pose>,
+    /// The head's `VIEW` space, located at camera frames' capture times.
+    view_space: Option<xr::Space>,
+    /// Head poses at recent captures, by frame timestamp.
+    captures: VecDeque<(i64, Pose)>,
+    /// Frames whose head pose could not be found, for the log.
+    unplaced: u32,
     depth_generation: u64,
     last_depth: Instant,
     depths: u64,
@@ -610,6 +694,11 @@ impl<V: Vision> Shell<V> {
             detections: 0,
             depth: spawn_depth(&data_dir, context),
             depth_map: None,
+            depth_head: None,
+            tracks_head: None,
+            view_space: context.xr_create_reference_space(xr::ReferenceSpaceType::VIEW),
+            captures: VecDeque::with_capacity(CAPTURES_KEPT),
+            unplaced: 0,
             depth_generation: 0,
             last_depth: Instant::now(),
             depths: 0,
@@ -791,6 +880,25 @@ impl<V: Vision> Shell<V> {
 
         let camera_frame = self.source.next_frame();
         if let Some(camera_frame) = camera_frame {
+            // Where the head was when the camera took it, while the
+            // runtime still remembers.
+            let captured = self.view_space.as_ref().and_then(|space| {
+                let time = context.xr_time_ago(frame_age(camera_frame.timestamp_ns)?)?;
+                let pose = context.xr_locate(space, time)?;
+                Some(Pose {
+                    orientation: pose.orientation,
+                    position: pose.position,
+                })
+            });
+            match captured {
+                Some(pose) => {
+                    if self.captures.len() == CAPTURES_KEPT {
+                        self.captures.pop_front();
+                    }
+                    self.captures.push_back((camera_frame.timestamp_ns, pose));
+                }
+                None => self.unplaced += 1,
+            }
             // Offer the frame to the models; a busy one drops it.
             if let Some(worker) = &self.detector
                 && self.last_detect.elapsed() >= DETECT_INTERVAL
@@ -814,16 +922,18 @@ impl<V: Vision> Shell<V> {
             self.detections += 1;
             self.rates.detect_latency_ms = observation.latency_ms;
             self.tracks = observation.tracks;
+            self.tracks_head = captured(&self.captures, observation.timestamp_ns);
             tracks_changed = true;
         }
         let mut depth_changed = false;
         if let Some(depth) = &self.depth
             && depth.generation() != self.depth_generation
-            && let Some(map) = depth.latest()
+            && let Some((map, timestamp)) = depth.latest()
         {
             self.depth_generation = depth.generation();
             self.depths += 1;
             self.depth_map = Some(map);
+            self.depth_head = captured(&self.captures, timestamp);
             depth_changed = true;
         }
         let (mut heard, mut speaking) = (None, false);
@@ -843,8 +953,10 @@ impl<V: Vision> Shell<V> {
             head,
             tracks: &self.tracks,
             tracks_changed,
+            tracks_head: self.tracks_head,
             depth: self.depth_map.as_ref(),
             depth_changed,
+            depth_head: self.depth_head,
             environment: self.environment_depth.as_ref(),
             environment_changed,
             heard,
@@ -880,7 +992,6 @@ impl<V: Vision> Shell<V> {
                 xr_view.fov.angle_up,
                 xr_view.fov.angle_down,
             ];
-            let eye = pose(xr_view).relative_to(&head);
             let mut pass = encoder.render(
                 "eye",
                 gpu::RenderTargetSet {
@@ -892,21 +1003,19 @@ impl<V: Vision> Shell<V> {
                     depth_stencil: None,
                 },
             );
-            let placement = match self.camera_model {
-                Some(ref camera) => {
-                    projection::placement(camera, &eye, fov, self.vision.placement_distance())
-                }
-                None => eye_placement(fov),
+            let mut eye = EyeView {
+                placement: Placement::FULLSCREEN,
+                eye: pose(xr_view),
+                head,
+                fov,
+                camera: self.camera_model,
+                distance: self.vision.placement_distance(),
+                extent: [extent.width, extent.height],
+                linear_target: self.linear_target,
+                passthrough: layered,
             };
-            self.vision.draw(
-                &mut pass,
-                &EyeView {
-                    placement,
-                    extent: [extent.width, extent.height],
-                    linear_target: self.linear_target,
-                    passthrough: layered,
-                },
-            );
+            eye.placement = eye.place(None);
+            self.vision.draw(&mut pass, &eye);
         }
 
         match output {
@@ -970,13 +1079,14 @@ impl<V: Vision> Shell<V> {
         let r = self.rates;
         info!(
             "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | depth {:.1} Hz | \
-             ahead {ahead:.2?} m | update {:.1} ms, worst {:.1} | {}",
+             ahead {ahead:.2?} m | update {:.1} ms, worst {:.1} | unplaced frames {} | {}",
             r.render_hz,
             r.detect_hz,
             r.detect_latency_ms,
             r.depth_hz,
             update_total / frames,
             update_worst,
+            std::mem::take(&mut self.unplaced),
             self.vision.status(),
         );
     }
@@ -1045,6 +1155,8 @@ pub fn run<V: Vision>() {
     extensions.khr_android_create_instance = true;
     extensions.fb_passthrough = available.fb_passthrough;
     extensions.meta_environment_depth = available.meta_environment_depth;
+    // Camera timestamps to XR time, for the head's pose at each capture.
+    extensions.khr_convert_timespec_time = available.khr_convert_timespec_time;
 
     let instance = entry.create_instance(
         &xr::ApplicationInfo {

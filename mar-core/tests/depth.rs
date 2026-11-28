@@ -9,10 +9,12 @@
 //! cargo test --release --test depth -- --include-ignored
 //! ```
 
+mod common;
+
 use std::path::Path;
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::perception::depth::DepthAnything;
+use mar_core::frame::{Eye, Frame};
+use mar_core::perception::depth::DepthAnything;
 
 fn read_f32(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -40,12 +42,14 @@ fn matches_onnxruntime(size: [u32; 2]) {
 #[test]
 #[ignore = "requires a GPU and ref/depth_small_336x252 (tools/fetch_depth.sh)"]
 fn depth_matches_onnxruntime() {
+    common::at_references();
     matches_onnxruntime([336, 252]);
 }
 
 #[test]
 #[ignore = "requires a GPU and ref/depth_small_224x168 (tools/fetch_depth.sh 224 168)"]
 fn small_depth_matches_onnxruntime() {
+    common::at_references();
     matches_onnxruntime([224, 168]);
 }
 
@@ -55,6 +59,7 @@ fn small_depth_matches_onnxruntime() {
 #[test]
 #[ignore = "requires a GPU and ref/depth_small_224x168 (tools/fetch_depth.sh 224 168)"]
 fn depth_orders_the_demo_photo() {
+    common::at_references();
     let rgb = image::open("ref/dog.jpg").expect("ref/dog.jpg").to_rgb8();
     let frame = Frame::from_rgb8(rgb.width(), rgb.height(), rgb.as_raw(), Eye::Left);
     let size = [224, 168];

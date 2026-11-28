@@ -256,37 +256,3 @@ impl Canvas {
         context.destroy_texture(self.texture);
     }
 }
-
-/// One HUD frame as a [`crate::render::Overlay`]: lays out `hud` on the
-/// canvas before the pass and composites it within.
-pub struct HudOverlay<'a> {
-    pub canvas: &'a mut Canvas,
-    pub hud: &'a mut super::Hud,
-    /// Seconds, the HUD's clock.
-    pub now: f32,
-    pub tracks: &'a [crate::perception::track::Track],
-    pub telemetry: super::Telemetry,
-}
-
-impl crate::render::Overlay for HudOverlay<'_> {
-    fn prepare(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder) {
-        let (hud, now, tracks, telemetry) =
-            (&mut *self.hud, self.now, self.tracks, &self.telemetry);
-        self.canvas.render(context, encoder, now as f64, |ui| {
-            hud.draw(ui, now, tracks, telemetry)
-        });
-    }
-
-    fn draw(
-        &self,
-        pass: &mut gpu::RenderCommandEncoder,
-        placement: Placement,
-        linear_target: bool,
-    ) {
-        self.canvas.composite(pass, placement, linear_target, 1.0);
-    }
-
-    fn submitted(&mut self, sync_point: &gpu::SyncPoint) {
-        self.canvas.after_submit(sync_point);
-    }
-}

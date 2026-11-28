@@ -31,8 +31,8 @@ use std::ffi::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::source::FrameSource;
+use mar_core::frame::{Eye, Frame};
+use mar_core::source::FrameSource;
 
 /// How long to wait between reopen attempts. The camera stays disabled for
 /// as long as the headset is off, so retrying hard would just spin.

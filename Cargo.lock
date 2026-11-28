@@ -1376,6 +1376,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mar-core"
+version = "0.1.0"
+dependencies = [
+ "blade-egui",
+ "blade-graphics",
+ "blade-macros 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blade-util",
+ "bytemuck",
+ "egui",
+ "env_logger",
+ "image",
+ "log",
+ "meganeura",
+]
+
+[[package]]
+name = "mar-shell"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "blade-graphics",
+ "log",
+ "mar-core",
+ "ndk-glue",
+ "openxr",
+]
+
+[[package]]
 name = "meganeura"
 version = "0.3.0"
 source = "git+https://github.com/kvark/meganeura?rev=07f2f51a60e38fc6401ca781082231138dd493e5#07f2f51a60e38fc6401ca781082231138dd493e5"
@@ -2004,28 +2032,14 @@ dependencies = [
 name = "red-eye"
 version = "0.1.0"
 dependencies = [
- "blade-egui",
  "blade-graphics",
- "blade-macros 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "blade-util",
- "bytemuck",
  "egui",
  "env_logger",
  "image",
  "log",
- "meganeura",
-]
-
-[[package]]
-name = "red-eye-xr"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "blade-graphics",
- "log",
+ "mar-core",
+ "mar-shell",
  "ndk-glue",
- "openxr",
- "red-eye",
 ]
 
 [[package]]

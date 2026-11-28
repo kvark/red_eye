@@ -9,9 +9,9 @@
 //! Vulkan device, including lavapipe, so it doubles as a smoke test of the
 //! render path.
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::grade::Grade;
-use red_eye::source::{FrameSource, TestPattern};
+use mar_core::frame::{Eye, Frame};
+use mar_core::grade::Grade;
+use mar_core::source::{FrameSource, TestPattern};
 
 fn main() {
     env_logger::init();
@@ -31,13 +31,13 @@ fn main() {
     let out_dir = std::path::PathBuf::from(args.next().unwrap_or_else(|| "out".into()));
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     for (name, grade) in [
         ("t1", Grade::t1()),
         ("t2", Grade::t2()),
         ("damaged", Grade::damaged()),
     ] {
-        let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0, &[]);
+        let pixels = mar_core::render::render_graded(&context, &frame, &grade, 0.0, &[]);
         let path = out_dir.join(format!("preview-{name}.png"));
         image::RgbaImage::from_raw(frame.width, frame.height, pixels)
             .unwrap()

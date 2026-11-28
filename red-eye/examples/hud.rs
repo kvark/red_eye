@@ -14,17 +14,18 @@
 
 use std::path::Path;
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::grade::Grade;
-use red_eye::hud::canvas::{Canvas, HudOverlay};
+use mar_core::frame::{Eye, Frame};
+use mar_core::grade::Grade;
+use mar_core::hud::canvas::Canvas;
+use mar_core::perception::dense;
+use mar_core::perception::depth::DepthAnything;
+use mar_core::perception::dfine::Dfine;
+use mar_core::perception::track::{Tracker, TrackerConfig};
+use mar_core::perception::yolox::{Config, Yolox};
+use mar_core::perception::{Detector, Label};
+use mar_core::render::{Overlay, WireframeOverlay, WireframePass, WireframeStyle};
+use red_eye::hud::HudOverlay;
 use red_eye::hud::{Hud, Telemetry};
-use red_eye::perception::dense;
-use red_eye::perception::depth::DepthAnything;
-use red_eye::perception::dfine::Dfine;
-use red_eye::perception::track::{Tracker, TrackerConfig};
-use red_eye::perception::yolox::{Config, Yolox};
-use red_eye::perception::{Detector, Label};
-use red_eye::render::{Overlay, WireframeOverlay, WireframePass, WireframeStyle};
 
 fn main() {
     env_logger::init();
@@ -45,7 +46,7 @@ fn main() {
         .to_rgb8();
     let frame = Frame::from_rgb8(rgb.width(), rgb.height(), rgb.as_raw(), Eye::Left);
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     let mut detector: Box<dyn Detector> = if model.ends_with(".onnx") {
         Box::new(Dfine::new(Path::new(model), [640, 480], Some(context.clone())).expect("D-FINE"))
     } else {
@@ -132,7 +133,7 @@ fn main() {
             tracks: shown,
             telemetry,
         };
-        let pixels = red_eye::render::render_offscreen(
+        let pixels = mar_core::render::render_offscreen(
             &context,
             &frame,
             &Grade::t2(),

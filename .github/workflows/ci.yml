@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo clippy --locked --target aarch64-linux-android -p red-eye-xr -- -D warnings
+      - run: cargo clippy --locked --target aarch64-linux-android -p mar-shell -p red-eye -- -D warnings
       - name: Fetch models and references
         run: |
           pip install -r tools/requirements.txt

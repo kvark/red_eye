@@ -8,11 +8,13 @@
 //! cargo test --release --test dfine -- --include-ignored
 //! ```
 
+mod common;
+
 use std::path::Path;
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::perception::Detector;
-use red_eye::perception::dfine::Dfine;
+use mar_core::frame::{Eye, Frame};
+use mar_core::perception::Detector;
+use mar_core::perception::dfine::Dfine;
 
 const DIR: &str = "ref/dfine_nano_640x480";
 const SIZE: [u32; 2] = [640, 480];
@@ -33,6 +35,7 @@ fn worst_relative_error(got: &[f32], expected: &[f32]) -> f32 {
 #[test]
 #[ignore = "requires a GPU and ref/dfine_nano_640x480 (tools/fetch_dfine.sh)"]
 fn dfine_matches_onnxruntime() {
+    common::at_references();
     let dir = Path::new(DIR);
     let mut model = Dfine::new(&dir.join("model.onnx"), SIZE, None).expect("model");
     assert_eq!(model.queries(), 300);
@@ -49,6 +52,7 @@ fn dfine_matches_onnxruntime() {
 #[test]
 #[ignore = "requires a GPU and ref/dfine_nano_640x480 (tools/fetch_dfine.sh)"]
 fn dfine_detects_on_a_frame() {
+    common::at_references();
     let rgb = image::open("ref/dog.jpg").expect("ref/dog.jpg").to_rgb8();
     let frame = Frame::from_rgb8(rgb.width(), rgb.height(), rgb.as_raw(), Eye::Left);
     let mut model = Dfine::new(&Path::new(DIR).join("model.onnx"), SIZE, None).expect("model");

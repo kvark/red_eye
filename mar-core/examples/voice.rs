@@ -12,8 +12,8 @@
 use std::path::Path;
 use std::time::Instant;
 
-use red_eye::voice::vad::{self, SAMPLE_RATE};
-use red_eye::voice::{Command, Grammar, MIN_CONFIDENCE, Moonshine, Vad, VadConfig};
+use mar_core::voice::vad::{self, SAMPLE_RATE};
+use mar_core::voice::{Command, Grammar, MIN_CONFIDENCE, Moonshine, Vad, VadConfig};
 
 fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;

@@ -1,39 +1,41 @@
-# RedEye
+# MAR
 
-T-800 augmented vision for Meta Quest 3: the world graded red, people and
-vehicles detected, tracked and locked onto, and a HUD drawn in the visual
-grammar of *The Terminator* and *Terminator 2*. Everything runs on the
-headset, with no network connections.
+Movie augmented reality: visions from films over the world on a Meta Quest
+3/3S, each an app of its own. Perception runs on the headset with no
+network connections, and overlays are drawn over the system's passthrough.
 
 Built on [Blade](https://github.com/kvark/blade) for GPU and OpenXR, and
 [Meganeura](https://github.com/kvark/meganeura) for on-device inference.
 
-- [docs/concept.md](docs/concept.md): the films' vision broken down into
+- `mar-core`: what every app shares, from camera frames to detectors,
+  depth, voice and the overlay passes. Builds and tests on a desktop.
+- `mar-shell`: the Android XR app they run in.
+- `red-eye`: **RedEye**, T-800 style augmented vision.
+
+A second app, a green "seeing the code" view, is planned on the same stack.
+
+- [docs/concept.md](docs/concept.md): RedEye's vision broken down into
   mechanics.
 - [docs/technology.md](docs/technology.md): architecture, model plan, frame
   budget, milestones.
 - [TASKS.md](TASKS.md): what to explore next, and where each idea stands.
-- [HANDOFF.md](HANDOFF.md): continuing on a machine with a Quest 3.
+- [HANDOFF.md](HANDOFF.md): continuing on a machine with a Quest.
 - [AGENTS.md](AGENTS.md): layout, commands and rules for contributors.
 
-## Status
+## RedEye
 
-- **Grade**: T1, T2 and damaged presets, shared between a WGSL pass and the
-  `XR_FB_passthrough` colour map, and verified to agree on the GPU.
-- **Detectors**: D-FINE-N (through Meganeura's ONNX importer) and YOLOX
-  (a hand-built Meganeura graph), both Apache-2.0 on COCO's 80 classes,
-  match their official models in onnxruntime. Preprocessing runs on the
-  GPU; decoding and tracking run on a worker thread.
-- **HUD**: egui with Starcom's monospace grid, in the films' layout. Name a
-  class and it scans, then brackets the match and types "MATCH".
-- **XR app**: shows the graded left passthrough camera with the HUD and
-  tracked detections over it. It type-checks for Android but has not yet
-  run on a headset.
+The world graded red by the compositor's passthrough. Objects are detected
+(D-FINE-N or YOLOX), tracked, ranged with the headset's depth, and the one
+you face is outlined with depth contours. A HUD in the visual grammar of
+*The Terminator* and *Terminator 2* runs over it. Say "track the motorcycle"
+and it scans, brackets the match and types "MATCH". On a Quest 3S it renders
+at about 45 Hz beside detection at 10 Hz.
 
 ```sh
 pip install -r tools/requirements.txt && tools/fetch_yolox.sh && tools/fetch_dfine.sh
 cargo test --release -- --include-ignored
 cargo run --release --example detect -- ref/dfine_nano_640x480/model.onnx photo.jpg out/detect.png
+cargo apk run --manifest-path red-eye/Cargo.toml --release --lib --no-logcat
 ```
 
 ## License

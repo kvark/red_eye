@@ -5,8 +5,8 @@
 //! sticks to its track while the track lives, so the lock does not hop
 //! between two motorcycles from frame to frame.
 
-use crate::perception::Label;
-use crate::perception::track::{Track, TrackId};
+use mar_core::perception::Label;
+use mar_core::perception::track::{Track, TrackId};
 
 /// Where targeting is, with the time (seconds) it got there, which drives
 /// the HUD's typing animations.
@@ -96,7 +96,7 @@ impl Targeting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perception::Rect;
+    use mar_core::perception::Rect;
 
     fn track(id: TrackId, label: u16, hits: u32, size: f32) -> Track {
         Track {

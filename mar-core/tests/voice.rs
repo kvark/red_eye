@@ -9,10 +9,12 @@
 //! cargo test --release --test voice -- --include-ignored
 //! ```
 
+mod common;
+
 use std::path::Path;
 
-use red_eye::perception::Label;
-use red_eye::voice::{Command, Grammar, MIN_CONFIDENCE, Moonshine};
+use mar_core::perception::Label;
+use mar_core::voice::{Command, Grammar, MIN_CONFIDENCE, Moonshine};
 
 const DIR: &str = "ref/moonshine_tiny_2s";
 
@@ -37,6 +39,7 @@ fn worst_relative_error(got: &[f32], expected: &[f32]) -> f32 {
 #[test]
 #[ignore = "requires a working GPU context and ref/moonshine_tiny_2s"]
 fn moonshine_matches_onnxruntime() {
+    common::at_references();
     let dir = Path::new(DIR);
     let mut model = Moonshine::new(dir, None).expect("model");
     let hidden = model
@@ -56,6 +59,7 @@ fn moonshine_matches_onnxruntime() {
 #[test]
 #[ignore = "requires a working GPU context and ref/moonshine_tiny_2s with speech"]
 fn a_spoken_command_is_recognised() {
+    common::at_references();
     let dir = Path::new(DIR);
     let grammar =
         Grammar::parse(&std::fs::read_to_string(dir.join("commands.txt")).expect("commands.txt"))

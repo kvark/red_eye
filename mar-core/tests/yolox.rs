@@ -9,10 +9,12 @@
 //! cargo test --release --test yolox -- --include-ignored
 //! ```
 
+mod common;
+
 use std::path::Path;
 
-use red_eye::perception::yolox::{self, Config, Yolox};
-use red_eye::perception::{Label, nms};
+use mar_core::perception::yolox::{self, Config, Yolox};
+use mar_core::perception::{Label, nms};
 
 fn read_f32(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -48,6 +50,7 @@ fn check_against_reference(variant: &str, config: Config, reference: &str) {
 #[test]
 #[ignore = "requires a GPU and ref/ YOLOX files (see the module docs)"]
 fn nano_matches_onnxruntime() {
+    common::at_references();
     check_against_reference("nano", Config::nano(), "ref/yolox_nano_reference");
     check_against_reference("nano", Config::nano(), "ref/yolox_nano_dog");
 }
@@ -55,6 +58,7 @@ fn nano_matches_onnxruntime() {
 #[test]
 #[ignore = "requires a GPU and ref/ YOLOX files (see the module docs)"]
 fn tiny_matches_onnxruntime() {
+    common::at_references();
     check_against_reference("tiny", Config::tiny(), "ref/yolox_tiny_reference");
 }
 
@@ -62,6 +66,7 @@ fn tiny_matches_onnxruntime() {
 #[test]
 #[ignore = "requires a GPU and ref/ YOLOX files (see the module docs)"]
 fn nano_finds_the_dog_and_the_bicycle() {
+    common::at_references();
     let config = Config::nano();
     let mut model = Yolox::new(
         config.clone(),
@@ -72,7 +77,7 @@ fn nano_finds_the_dog_and_the_bicycle() {
     let input = read_f32(Path::new("ref/yolox_nano_dog/input.bin"));
     let output = model.run(&input).to_vec();
     // The reference letterboxed a 768×576 picture into 416².
-    let fit = red_eye::perception::preprocess::Fit::new([768, 576], &config.input_spec());
+    let fit = mar_core::perception::preprocess::Fit::new([768, 576], &config.input_spec());
     let mut dets = yolox::decode(&output, &config, &fit, 0.35);
     nms(&mut dets, 0.45);
     let names: Vec<_> = dets.iter().map(|d| d.label.name()).collect();
@@ -93,8 +98,9 @@ fn nano_finds_the_dog_and_the_bicycle() {
 #[test]
 #[ignore = "requires a GPU and ref/ YOLOX files (see the module docs)"]
 fn detector_on_a_frame() {
-    use red_eye::frame::{Eye, Frame};
-    use red_eye::perception::Detector;
+    common::at_references();
+    use mar_core::frame::{Eye, Frame};
+    use mar_core::perception::Detector;
 
     let rgb = image::open("ref/dog.jpg").expect("ref/dog.jpg").to_rgb8();
     let frame = Frame::from_rgb8(rgb.width(), rgb.height(), rgb.as_raw(), Eye::Left);

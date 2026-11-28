@@ -59,8 +59,9 @@ SYNONYMS = {
 
 
 def coco_names(repo):
-    """The app's label names, from `src/perception/labels.rs`."""
-    source = open(os.path.join(repo, "src", "perception", "labels.rs"), encoding="utf-8").read()
+    """The app's label names, from `mar-core/src/perception/labels.rs`."""
+    path = os.path.join(repo, "mar-core", "src", "perception", "labels.rs")
+    source = open(path, encoding="utf-8").read()
     block = source[source.index("COCO_NAMES") :]
     block = block[block.index("[", block.index("=")) : block.index("];")]
     return re.findall(r'"([^"]+)"', block)

@@ -4,15 +4,15 @@
 //! cargo test -- --include-ignored
 //! ```
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::grade::Grade;
+use mar_core::frame::{Eye, Frame};
+use mar_core::grade::Grade;
 
 /// The WGSL grade and `Grade::map` must agree, or the passthrough colour map
 /// and the self-rendered fallback would show two different looks.
 #[test]
 #[ignore = "requires a working GPU context"]
 fn shader_grade_matches_reference() {
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     // One row per luminance level, two pixels wide so that 4:2:0 is happy
     // and linear filtering at the texel centre returns the exact value.
     let (width, height) = (2u32, 256u32);
@@ -21,7 +21,7 @@ fn shader_grade_matches_reference() {
         row.fill(y as u8);
     }
     let grade = Grade::default().tone_only();
-    let pixels = red_eye::render::render_graded(&context, &frame, &grade, 0.0, &[]);
+    let pixels = mar_core::render::render_graded(&context, &frame, &grade, 0.0, &[]);
 
     let mut worst = 0.0f32;
     for y in 0..height as usize {
@@ -45,10 +45,10 @@ fn shader_grade_matches_reference() {
 #[ignore = "requires a working GPU context"]
 fn preprocess_matches_reference() {
     use blade_graphics as gpu;
-    use red_eye::perception::preprocess::{self, GpuPreprocess};
-    use red_eye::perception::{dfine, yolox};
+    use mar_core::perception::preprocess::{self, GpuPreprocess};
+    use mar_core::perception::{dfine, yolox};
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     let (width, height) = (320u32, 240u32);
     let rgb: Vec<u8> = (0..height)
         .flat_map(|y| {
@@ -102,15 +102,15 @@ fn preprocess_matches_reference() {
 #[test]
 #[ignore = "requires a working GPU context"]
 fn boxes_outline_their_rect() {
-    use red_eye::perception::Rect;
-    use red_eye::render::BoxInstance;
+    use mar_core::perception::Rect;
+    use mar_core::render::BoxInstance;
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     // Black frame; at 800 px the offscreen helper draws 2 px lines.
     let frame = Frame::new(800, 800, Eye::Left);
     let rect = Rect::new(0.25, 0.25, 0.75, 0.75);
     let boxes = [BoxInstance::new(&rect, [1.0, 1.0, 1.0, 1.0])];
-    let pixels = red_eye::render::render_graded(&context, &frame, &Grade::t1(), 0.0, &boxes);
+    let pixels = mar_core::render::render_graded(&context, &frame, &Grade::t1(), 0.0, &boxes);
     let at = |x: usize, y: usize| &pixels[(y * 800 + x) * 4..][..3];
     assert_eq!(at(200, 400), [255, 255, 255], "left edge");
     assert_eq!(at(400, 600), [255, 255, 255], "bottom edge");
@@ -124,93 +124,16 @@ fn boxes_outline_their_rect() {
     );
 }
 
-/// The HUD lands where its layout puts it: with a matched target, the state
-/// word in the bottom-centre band and brackets at the track's corners, over
-/// a frame that is otherwise graded black.
-#[test]
-#[ignore = "requires a working GPU context"]
-fn hud_draws_match_and_brackets() {
-    use red_eye::hud::canvas::{Canvas, HudOverlay};
-    use red_eye::hud::{Hud, Telemetry};
-    use red_eye::perception::track::Track;
-    use red_eye::perception::{Label, Rect};
-
-    let context = red_eye::init_context(None).expect("no GPU");
-    let (w, h) = (640u32, 480u32);
-    let frame = Frame::new(w, h, Eye::Left);
-    let bicycle = Label::from_name("bicycle").unwrap();
-    let tracks = [Track {
-        id: 7,
-        label: bicycle,
-        rect: Rect::new(0.25, 0.25, 0.5, 0.6),
-        score: 0.9,
-        hits: 5,
-        misses: 0,
-        age: 5,
-    }];
-    let mut canvas = Canvas::new(
-        &context,
-        [w, h],
-        w as f32 / 1280.0,
-        blade_graphics::TextureFormat::Rgba8Unorm,
-    );
-    let mut hud = Hud::default();
-    hud.set_target(Some(bicycle), 0.0);
-    let render = |hud: &mut Hud, canvas: &mut Canvas| {
-        let mut overlay = HudOverlay {
-            canvas,
-            hud,
-            // Long enough after the match for every line to have typed out.
-            now: 5.0,
-            tracks: &tracks,
-            telemetry: Telemetry::default(),
-        };
-        red_eye::render::render_offscreen(
-            &context,
-            &frame,
-            &Grade::t1(),
-            0.0,
-            &[],
-            &mut [&mut overlay],
-        )
-    };
-    let pixels = render(&mut hud, &mut canvas);
-    canvas.destroy(&context);
-
-    let bright = |x0: f32, x1: f32, y0: f32, y1: f32| {
-        let mut count = 0;
-        for y in (y0 * h as f32) as u32..(y1 * h as f32) as u32 {
-            for x in (x0 * w as f32) as u32..(x1 * w as f32) as u32 {
-                let p = &pixels[((y * w + x) * 4) as usize..][..3];
-                if p.iter().all(|&c| c > 200) {
-                    count += 1;
-                }
-            }
-        }
-        count
-    };
-    // "MATCH" and its cursor, bottom centre.
-    assert!(bright(0.3, 0.7, 0.80, 0.92) > 300, "no state word");
-    // The bracket at the track's top-left corner.
-    assert!(bright(0.24, 0.30, 0.24, 0.27) > 20, "no bracket");
-    // Inside the track, away from the HUD's panels: untouched black.
-    assert_eq!(
-        bright(0.30, 0.45, 0.30, 0.55),
-        0,
-        "the HUD leaks into the middle"
-    );
-}
-
 /// Depth contours stay inside the mask and wrap the shape: a dome of depth
 /// inside a disc mask draws rings, with gaps between them, an outline at
 /// the disc's edge, and nothing outside it.
 #[test]
 #[ignore = "requires a working GPU context"]
 fn wireframe_draws_contours_inside_the_mask() {
-    use red_eye::perception::dense::{DepthMap, Mask};
-    use red_eye::render::{WireframeOverlay, WireframePass, WireframeStyle};
+    use mar_core::perception::dense::{DepthMap, Mask};
+    use mar_core::render::{WireframeOverlay, WireframePass, WireframeStyle};
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     let (w, h) = (320u32, 320u32);
     let frame = Frame::new(w, h, Eye::Left);
     let inside = |u: f32, v: f32| (u - 0.5).powi(2) + (v - 0.5).powi(2) < 0.3f32.powi(2);
@@ -232,7 +155,7 @@ fn wireframe_draws_contours_inside_the_mask() {
             ..Default::default()
         },
     };
-    let pixels = red_eye::render::render_offscreen(
+    let pixels = mar_core::render::render_offscreen(
         &context,
         &frame,
         &Grade::t1(),
@@ -282,10 +205,10 @@ fn wireframe_draws_contours_inside_the_mask() {
 #[ignore = "requires a working GPU context"]
 fn environment_depth_resamples_both_layers() {
     use blade_graphics as gpu;
-    use red_eye::perception::environment::{DepthView, GRID, Resample};
-    use red_eye::projection::Pose;
+    use mar_core::perception::environment::{DepthView, GRID, Resample};
+    use mar_core::projection::Pose;
 
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     let (width, height) = (64u32, 48u32);
     // Each texel holds its own coordinates and layer, so any misplaced
     // read shows.

@@ -1,29 +1,23 @@
-//! The RedEye XR application.
+//! The XR app every MAR vision runs in.
 //!
-//! The left passthrough camera, graded red, drawn to both eyes at display
-//! rate, with detections outlined over it and the HUD on top. Detection runs on a worker
-//! thread sharing the GPU context and never holds up a frame. The OpenXR
-//! plumbing is taken from DinoVision, where it was proven on a Quest 3.
+//! A vision ([`Vision`]) decides how the world looks and what is drawn over
+//! it; the shell does everything else, the same for every vision:
 //!
-//! This is the *self-rendered* world view. The target architecture lets the
-//! compositor draw passthrough with the grade as its colour map and keeps
-//! our layer for the HUD only; that needs Blade to submit an
-//! `XR_FB_passthrough` layer beneath ours. See `docs/technology.md`.
+//! - the OpenXR session and its frames, with the system's passthrough under
+//!   our layer (or, without `XR_FB_passthrough`, an opaque layer the vision
+//!   draws the camera into);
+//! - the left passthrough camera and its calibration, which places
+//!   camera-image overlays in each eye ([`mar_core::projection`]);
+//! - the headset's environment depth, read back each frame;
+//! - detection and tracking, monocular depth and voice commands, each on a
+//!   thread of its own sharing the GPU context, never holding up a frame;
+//! - focus: camera, microphone, passthrough and depth run only while the
+//!   app has it;
+//! - rates for the HUD and a periodic log line.
 //!
-//! ```text
-//! cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat
-//! adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA
-//! adb logcat -v time | grep -E "red_eye|RustStdoutStderr"
-//! ```
-//!
-//! Detection needs a model on the device; without one the app runs
-//! without it. D-FINE is preferred, YOLOX-Nano is the light fallback:
-//!
-//! ```text
-//! adb shell mkdir -p /data/local/tmp/red_eye
-//! adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx
-//! adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
-//! ```
+//! What a vision gets to see each frame is [`Senses`]. Models and switches
+//! live in the vision's data directory, pushed with `adb`; anything missing
+//! is logged and done without.
 
 #![cfg(target_os = "android")]
 
@@ -31,140 +25,178 @@ mod camera;
 mod listen;
 mod microphone;
 
+pub use listen::Heard;
+
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use blade_graphics as gpu;
 use log::{info, warn};
+use mar_core::frame::{Eye, Frame};
+use mar_core::perception::Detector;
+use mar_core::perception::dense::DepthMap;
+use mar_core::perception::depth::DepthAnything;
+use mar_core::perception::dfine::Dfine;
+use mar_core::perception::environment::{self, DepthView, EnvironmentDepth, Resample};
+use mar_core::perception::track::{Track, TrackerConfig};
+use mar_core::perception::worker::{Background, Worker};
+use mar_core::perception::yolox::{Config as YoloxConfig, Yolox};
+use mar_core::projection::{self, CameraModel, Pose};
+use mar_core::render::Placement;
+use mar_core::source::{FrameSource, TestPattern};
 use openxr as xr;
-use red_eye::frame::Eye;
-use red_eye::grade::Grade;
-use red_eye::hud::canvas::Canvas;
-use red_eye::hud::{Hud, Telemetry};
-use red_eye::perception::Detector;
-use red_eye::perception::Label;
-use red_eye::perception::dense::{self, DepthMap, Mask};
-use red_eye::perception::depth::DepthAnything;
-use red_eye::perception::dfine::Dfine;
-use red_eye::perception::environment::{self, DepthView, EnvironmentDepth, Resample};
-use red_eye::perception::track::TrackerConfig;
-use red_eye::perception::track::{self as track, Track};
-use red_eye::perception::worker::Background;
-use red_eye::perception::worker::Worker;
-use red_eye::perception::yolox::{Config, Yolox};
-use red_eye::projection::{self, CameraModel, Pose};
-use red_eye::render::{BoxInstance, BoxPass, GradePass, Placement, WireframePass, WireframeStyle};
-use red_eye::source::{FrameSource, TestPattern};
-use red_eye::voice::Command;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
-const CAPTURE_SIZE: (i32, i32) = (1280, 960);
 
-/// The distance, in metres, at which overlays drawn in camera coordinates
-/// line up exactly with the world: the plane the camera image is placed on.
-/// Things nearer or farther are off by the parallax between camera and eye,
-/// a degree or two for the right eye at arm's length. With the headset's
-/// depth the plane moves to the outlined object; this is where it starts,
-/// and where it stays without one.
-const PLACEMENT_DISTANCE: f32 = 1.5;
+/// The camera stream: what the Quest 3/3S passthrough cameras offer.
+pub const CAPTURE_SIZE: [u32; 2] = [1280, 960];
 
-/// The placement plane's limits: the depth sensor's useful range.
-const PLACEMENT_RANGE: std::ops::RangeInclusive<f32> = 0.3..=6.0;
-
-/// Share of a new measurement in each smoothed distance: the depth is
-/// noisy at object edges, and a plane that jumps shakes every overlay.
-const RANGE_SMOOTHING: f32 = 0.3;
-
-/// With this file present, the first environment depth frame is logged,
-/// for checking its encoding on the host (`tools/env_depth.py`).
-const DUMP_DEPTH_PATH: &str = "/data/local/tmp/red_eye/dump_depth";
-
-/// Detector models, pushed with `adb` rather than bundled while the model
-/// choice is still moving. D-FINE (`tools/fetch_dfine.sh`, prepared at
-/// [`DFINE_SIZE`]) is preferred when present: it is far more accurate, at
-/// about six times YOLOX-Nano's compute. YOLOX-Nano
-/// (`tools/fetch_yolox.sh`) is the light fallback.
-const DFINE_PATH: &str = "/data/local/tmp/red_eye/dfine_nano.onnx";
+/// D-FINE's input, as `tools/fetch_dfine.sh` prepares it.
 const DFINE_SIZE: [u32; 2] = [640, 480];
-const YOLOX_PATH: &str = "/data/local/tmp/red_eye/yolox_nano.safetensors";
 
-/// Depth Anything V2 Small, prepared by `tools/fetch_depth.sh 224 168`. The
-/// wireframe needs coarse depth only, so the smallest input that keeps the
-/// cameras' 4:3 in 14-pixel patches.
-const DEPTH_PATH: &str = "/data/local/tmp/red_eye/depth_small.onnx";
+/// Depth Anything V2 Small's input, as `tools/fetch_depth.sh 224 168`
+/// prepares it: overlays need coarse depth only, so the smallest that keeps
+/// the cameras' 4:3 in 14-pixel patches.
 const DEPTH_SIZE: [u32; 2] = [224, 168];
 
 /// Least time between depth frames: it shares the GPU with detection and
-/// the display, and the wireframe tolerates stale depth.
+/// the display, and its users tolerate stale depth. Every 250 ms halved the
+/// display rate on a Quest 3S.
 const DEPTH_INTERVAL: Duration = Duration::from_millis(500);
-
-/// Resolution of the silhouette mask the wireframe outlines.
-const MASK_SIZE: [u32; 2] = [320, 240];
-
-/// Contour lines across the depth range of what is outlined.
-const CONTOURS: f32 = 8.0;
 
 /// Upper bound on detection rate: the 24 Hz target. Submitting faster would
 /// only take GPU time from the display.
 const DETECT_INTERVAL: Duration = Duration::from_millis(41);
 
-/// Meganeura splits the network into this many queue submissions so the
+/// Meganeura splits each network into this many queue submissions so the
 /// renderer's submissions can interleave. Two was best in DinoVision's
-/// co-tenancy sweep; re-measure for YOLOX.
+/// co-tenancy sweep.
 const SUBMISSION_CHUNKS: usize = 2;
 
-/// Frames a track must be seen in before it is outlined.
-const CONFIRM_HITS: u32 = 2;
-
-/// Outline thickness in eye-buffer pixels.
-const BOX_THICKNESS: f32 = 3.0;
-
-/// The class to look for, by COCO name, until voice commands set it:
-///
-/// ```text
-/// adb shell "echo motorcycle > /data/local/tmp/red_eye/target"
-/// adb shell rm /data/local/tmp/red_eye/target       # stand down
-/// ```
-///
-/// With a target, the HUD brackets the match and the debug boxes go away.
-const TARGET_PATH: &str = "/data/local/tmp/red_eye/target";
-const TARGET_POLL: Duration = Duration::from_secs(1);
-
-/// Moonshine-tiny and the command grammar, prepared by
-/// `tools/fetch_moonshine.sh` and pushed with `adb`.
-const VOICE_DIR: &str = "/data/local/tmp/red_eye/moonshine";
-
-/// The HUD canvas covers the camera image at its own resolution, laid out
-/// at one pixel per point.
-const HUD_SIZE: [u32; 2] = [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32];
-
-/// The target file's contents, when they differ from `last`: the file is
-/// a fallback beside voice, so it only names a target when it changes, and
-/// does not undo what was said since.
-fn read_target(last: &mut Option<String>) -> Option<Option<Label>> {
-    let name = std::fs::read_to_string(TARGET_PATH).unwrap_or_default();
-    if last.as_deref() == Some(name.as_str()) {
-        return None;
-    }
-    let label = Label::from_name(&name);
-    if label.is_none() && !name.trim().is_empty() {
-        warn!("{TARGET_PATH}: {:?} is not a COCO class", name.trim());
-    }
-    *last = Some(name);
-    Some(label)
+/// Who a vision is, and where its files are.
+pub struct Config {
+    /// Shown in the log and given to OpenXR.
+    pub name: &'static str,
+    /// The Android log tag.
+    pub log_tag: &'static str,
+    /// The Android package, for the `adb` hints in the log.
+    pub package: &'static str,
+    /// Where models and switches are pushed with `adb`:
+    /// `dfine_nano.onnx` or `yolox_nano.safetensors` for detection,
+    /// `depth_small.onnx` for depth, `moonshine/` for voice.
+    pub data_dir: &'static str,
 }
 
-fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
-    let dfine = std::path::PathBuf::from(DFINE_PATH);
-    let yolox = std::path::PathBuf::from(YOLOX_PATH);
+/// Rates the shell measures, refreshed every second.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rates {
+    pub render_hz: f32,
+    pub detect_hz: f32,
+    pub depth_hz: f32,
+    /// Capture to tracks, of the latest detection.
+    pub detect_latency_ms: f32,
+}
+
+/// What the shell perceived, as of this frame.
+pub struct Senses<'a> {
+    /// Seconds since the vision started.
+    pub time: f32,
+    /// Whether the compositor draws the world under our layer. Without it
+    /// the vision draws the camera image itself.
+    pub passthrough: bool,
+    /// The newest camera frame, when one arrived since the last frame.
+    pub frame: Option<&'a Frame>,
+    /// The open camera's model, when Camera2 reports its calibration.
+    pub camera: Option<&'a CameraModel>,
+    /// The latest tracks, and whether they changed this frame.
+    pub tracks: &'a [Track],
+    pub tracks_changed: bool,
+    /// Monocular relative depth over the camera image, and whether it
+    /// changed this frame.
+    pub depth: Option<&'a DepthMap>,
+    pub depth_changed: bool,
+    /// The headset's metric depth with the head pose it goes with, and
+    /// whether it changed this frame.
+    pub environment: Option<&'a (EnvironmentDepth, Pose)>,
+    pub environment_changed: bool,
+    /// A voice command heard since the last frame.
+    pub heard: Option<Heard>,
+    /// Someone is speaking now.
+    pub speaking: bool,
+    pub rates: Rates,
+}
+
+/// One eye being drawn.
+pub struct EyeView {
+    /// Carries the camera image, and anything drawn in its coordinates,
+    /// onto this eye.
+    pub placement: Placement,
+    /// The eye buffer's size in pixels.
+    pub extent: [u32; 2],
+    /// The target encodes sRGB itself, so shaders write linear values.
+    pub linear_target: bool,
+    /// See [`Senses::passthrough`].
+    pub passthrough: bool,
+}
+
+/// A look at the world: one MAR app.
+pub trait Vision: Sized {
+    fn config() -> Config;
+
+    /// Called once the XR session is ready; `format` is the eye buffers'.
+    fn new(context: &Arc<gpu::Context>, format: gpu::TextureFormat) -> Self;
+
+    /// How the compositor's passthrough shows the world.
+    fn passthrough_style(&self) -> gpu::xr::PassthroughStyle;
+
+    /// React to what was sensed and record this frame's uploads. The
+    /// previous frame's GPU work has finished, so its buffers are free.
+    fn update(
+        &mut self,
+        context: &gpu::Context,
+        encoder: &mut gpu::CommandEncoder,
+        senses: &Senses,
+    );
+
+    /// Depth along the camera's axis, in metres, of the plane camera-image
+    /// overlays are placed on: they line up exactly with things at that
+    /// depth.
+    fn placement_distance(&self) -> f32 {
+        1.5
+    }
+
+    /// Draw into one eye; called for each after [`Vision::update`].
+    fn draw(&mut self, pass: &mut gpu::RenderCommandEncoder, eye: &EyeView);
+
+    /// The frame's work was submitted.
+    fn after_submit(&mut self, _sync: &gpu::SyncPoint) {}
+
+    /// Appended to the shell's periodic log line.
+    fn status(&self) -> String {
+        String::new()
+    }
+
+    fn destroy(self, context: &gpu::Context);
+}
+
+fn spawn_detector(dir: &Path, context: &Arc<gpu::Context>) -> Option<Worker> {
+    let dfine = dir.join("dfine_nano.onnx");
+    let yolox = dir.join("yolox_nano.safetensors");
     if !dfine.exists() && !yolox.exists() {
-        warn!("no detector at {DFINE_PATH} or {YOLOX_PATH}; running without detection");
+        warn!(
+            "no detector at {} or {}; running without detection",
+            dfine.display(),
+            yolox.display()
+        );
         return None;
     }
     let context = Arc::clone(context);
     Some(Worker::spawn(
         move || {
+            // D-FINE is far more accurate, at about six times YOLOX-Nano's
+            // compute; YOLOX-Nano is the light fallback.
             let model: Box<dyn Detector> = if dfine.exists() {
                 let mut model = Dfine::new(&dfine, DFINE_SIZE, Some(context))?;
                 model.session().set_submission_chunks(SUBMISSION_CHUNKS);
@@ -174,7 +206,7 @@ fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
                 );
                 Box::new(model)
             } else {
-                let config = Config::nano().at_input(416, 320);
+                let config = YoloxConfig::nano().at_input(416, 320);
                 let mut model = Yolox::new(config, &yolox, Some(context))?;
                 model.session().set_submission_chunks(SUBMISSION_CHUNKS);
                 info!("detector ready: YOLOX-Nano at 416x320");
@@ -187,10 +219,10 @@ fn spawn_detector(context: &Arc<gpu::Context>) -> Option<Worker> {
 }
 
 /// The depth model on a thread of its own, if it was pushed to the device.
-fn spawn_depth(context: &Arc<gpu::Context>) -> Option<Background<DepthMap>> {
-    let path = std::path::PathBuf::from(DEPTH_PATH);
+fn spawn_depth(dir: &Path, context: &Arc<gpu::Context>) -> Option<Background<DepthMap>> {
+    let path = dir.join("depth_small.onnx");
     if !path.exists() {
-        warn!("no depth model at {DEPTH_PATH}; no wireframe");
+        warn!("no depth model at {}; no monocular depth", path.display());
         return None;
     }
     let context = Arc::clone(context);
@@ -201,12 +233,13 @@ fn spawn_depth(context: &Arc<gpu::Context>) -> Option<Background<DepthMap>> {
             "depth ready: Depth Anything V2 Small at {}x{}",
             DEPTH_SIZE[0], DEPTH_SIZE[1]
         );
-        Ok(move |frame: &red_eye::frame::Frame| model.run_frame(frame))
+        Ok(move |frame: &Frame| model.run_frame(frame))
     }))
 }
 
 /// Place the camera image in an eye whose frustum is `[left, right, up,
-/// down]` radians: span the frustum symmetrically about the eye's axis.
+/// down]` radians, for a camera without calibration: span the frustum
+/// symmetrically about the eye's axis.
 ///
 /// Headset frusta are asymmetric and mirrored between the eyes, so filling
 /// the eye buffer edge to edge would put the image centre at a different
@@ -253,7 +286,7 @@ fn camera_model(calibration: &camera::Calibration) -> Option<CameraModel> {
     let model = CameraModel::from_sensor(
         intrinsics,
         [array[2] as u32, array[3] as u32],
-        [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32],
+        CAPTURE_SIZE,
         projection::conjugate(rotation),
         calibration.translation.unwrap_or_default(),
     );
@@ -303,19 +336,21 @@ fn dump_depth(depth: &EnvironmentDepth, head: &Pose) {
     }
 }
 
-/// Debugging switch for the passthrough colour map's encoding, which the
-/// extension does not document: with this file present the map is
-/// converted from sRGB-encoded values to linear ones.
-const LINEAR_LUT_PATH: &str = "/data/local/tmp/red_eye/lut_linear";
-
-/// The system's passthrough, recoloured by the grade: stereo-correct,
+/// The system's passthrough in the vision's style: stereo-correct,
 /// reprojected with the head at display rate, and free for our GPU. `None`
-/// where the runtime lacks `XR_FB_passthrough`; the app then draws the
-/// left camera itself, as before.
-fn create_passthrough(context: &gpu::Context, grade: &Grade) -> Option<gpu::xr::Passthrough> {
-    let mut lut = grade.mono_to_rgba_lut();
-    let linear = std::path::Path::new(LINEAR_LUT_PATH).exists();
-    if linear {
+/// where the runtime lacks `XR_FB_passthrough`; the vision then draws the
+/// camera itself.
+///
+/// The extension does not say how its colour map is encoded; with
+/// `lut_linear` in the data directory, a mono-to-RGBA map is converted from
+/// sRGB-encoded values to linear ones, to compare the two in the headset.
+fn create_passthrough(
+    context: &gpu::Context,
+    mut style: gpu::xr::PassthroughStyle,
+    dir: &Path,
+) -> Option<gpu::xr::Passthrough> {
+    let linear = dir.join("lut_linear").exists();
+    if let (true, gpu::xr::PassthroughColorMap::MonoToRgba(lut)) = (linear, &mut style.color_map) {
         let to_linear = |c: f32| {
             if c <= 0.04045 {
                 c / 12.92
@@ -329,18 +364,13 @@ fn create_passthrough(context: &gpu::Context, grade: &Grade) -> Option<gpu::xr::
             }
         }
     }
-    let style = gpu::xr::PassthroughStyle {
-        opacity: 1.0,
-        edge_color: [0.0; 4],
-        color_map: gpu::xr::PassthroughColorMap::MonoToRgba(Box::new(lut)),
-    };
     let passthrough = context.create_xr_passthrough(&style);
     match passthrough {
         Some(_) => info!(
-            "compositor passthrough, grade LUT {}",
+            "compositor passthrough, colour map {}",
             if linear { "linearized" } else { "as encoded" }
         ),
-        None => warn!("no compositor passthrough; drawing the camera image"),
+        None => warn!("no compositor passthrough; the vision draws the camera image"),
     }
     passthrough
 }
@@ -352,8 +382,8 @@ fn is_srgb(format: gpu::TextureFormat) -> bool {
     )
 }
 
-/// Where this frame renders: a projection layer under the passthrough's,
-/// or the single layer `present` ends the frame with.
+/// Where this frame renders: a projection layer over the passthrough's, or
+/// the single layer `present` ends the frame with.
 enum Output {
     Layered {
         frame: gpu::xr::Frame,
@@ -362,12 +392,18 @@ enum Output {
     Presented(gpu::Frame),
 }
 
-struct App {
+/// A vision in the shell, for the length of an XR session.
+struct Shell<V> {
+    vision: V,
+    data_dir: PathBuf,
+    package: &'static str,
     surface: gpu::xr::Surface,
     passthrough: Option<gpu::xr::Passthrough>,
     source: Box<dyn FrameSource>,
     /// The open camera's model, for placing what it saw in each eye.
     camera_model: Option<CameraModel>,
+    camera_active: bool,
+    linear_target: bool,
     /// The headset's sensed depth, when the runtime offers it and
     /// USE_SCENE is granted.
     environment: Option<gpu::xr::EnvironmentDepth>,
@@ -377,132 +413,100 @@ struct App {
     resample_head: Pose,
     environment_depth: Option<(EnvironmentDepth, Pose)>,
     dumped_depth: bool,
-    /// Camera depth of the plane overlays are placed on, following the
-    /// outlined object.
-    placement_distance: f32,
-    camera_active: bool,
-    grade_pass: GradePass,
-    grade: Grade,
-    linear_target: bool,
-    box_pass: BoxPass,
-    wireframe: WireframePass,
+    detector: Option<Worker>,
+    last_detect: Instant,
+    shown_generation: u64,
+    tracks: Vec<Track>,
+    detections: u64,
     depth: Option<Background<DepthMap>>,
-    /// Voice commands, if the model was pushed.
-    listener: Option<listen::Listener>,
-    heard_generation: u64,
-    /// What the target file last said.
-    target_file: Option<String>,
     depth_map: Option<DepthMap>,
     depth_generation: u64,
     last_depth: Instant,
     depths: u64,
-    depth_hz: f32,
-    /// The wireframe's style for the mask last uploaded; `None` until both
-    /// depth and something to outline exist.
-    wireframe_style: Option<WireframeStyle>,
-    hud_canvas: Canvas,
-    hud: Hud,
-    tracks: Vec<Track>,
-    last_target_poll: Instant,
-    detect_hz: f32,
-    render_hz: f32,
+    /// Voice commands, if the model was pushed.
+    listener: Option<listen::Listener>,
+    heard_generation: u64,
+    rates: Rates,
     /// Seconds of rates measured since the last log line.
     reports: u32,
-    detector: Option<Worker>,
-    last_detect: Instant,
-    shown_generation: u64,
-    detections: u64,
-    detect_latency_ms: f32,
     start: Instant,
-    /// The previous submission. The grade pass reuses one staging buffer,
-    /// so its upload must not be overwritten while still in flight.
+    /// The previous submission, waited on before its buffers are reused.
     last_submit: Option<gpu::SyncPoint>,
     frames: u64,
     last_report: Instant,
 }
 
-impl App {
-    fn new(context: &Arc<gpu::Context>) -> Self {
+impl<V: Vision> Shell<V> {
+    fn new(context: &Arc<gpu::Context>, config: &Config) -> Self {
         let surface = context
             .create_xr_surface()
             .expect("unable to create XR surface");
         let format = surface.format();
         info!("XR swapchain format {format:?}");
-        let (source, camera_model) = Self::open_camera();
-        let grade = Grade::default();
-        let passthrough = create_passthrough(context, &grade);
+        let data_dir = PathBuf::from(config.data_dir);
+        let vision = V::new(context, format);
+        let passthrough = create_passthrough(context, vision.passthrough_style(), &data_dir);
         let environment = context.create_xr_environment_depth();
         match environment {
             Some(ref environment) => {
                 if let Err(e) = environment.start() {
                     warn!("environment depth would not start: {e}");
                 }
-                // Hands are not objects to range.
+                // Hands are not part of the scene.
                 if let Err(e) = environment.set_hand_removal(true) {
                     warn!("environment depth hand removal: {e}");
                 }
                 info!("environment depth started");
             }
             None => warn!(
-                "no environment depth; grant it with: adb shell pm grant \
-                 rust.red_eye_xr com.oculus.permission.USE_SCENE"
+                "no environment depth; grant it with: adb shell pm grant {} \
+                 com.oculus.permission.USE_SCENE",
+                config.package
             ),
         }
+        let (source, camera_model) = Self::open_camera(config.package);
         Self {
+            vision,
+            surface,
             passthrough,
+            source,
+            camera_model,
+            camera_active: true,
+            linear_target: is_srgb(format),
             environment,
             resample: Resample::new(context),
             resample_head: Pose::IDENTITY,
             environment_depth: None,
             dumped_depth: false,
-            placement_distance: PLACEMENT_DISTANCE,
-            grade_pass: GradePass::new(
-                context,
-                format,
-                [CAPTURE_SIZE.0 as u32, CAPTURE_SIZE.1 as u32],
-            ),
-            linear_target: is_srgb(format),
-            box_pass: BoxPass::new(context, format),
-            wireframe: WireframePass::new(context, format),
-            depth: spawn_depth(context),
-            listener: listen::Listener::spawn(std::path::Path::new(VOICE_DIR), context),
-            heard_generation: 0,
-            target_file: None,
+            detector: spawn_detector(&data_dir, context),
+            last_detect: Instant::now(),
+            shown_generation: 0,
+            tracks: Vec::new(),
+            detections: 0,
+            depth: spawn_depth(&data_dir, context),
             depth_map: None,
             depth_generation: 0,
             last_depth: Instant::now(),
             depths: 0,
-            depth_hz: 0.0,
-            wireframe_style: None,
-            hud_canvas: Canvas::new(context, HUD_SIZE, 1.0, format),
-            hud: Hud::default(),
-            tracks: Vec::new(),
-            last_target_poll: Instant::now() - TARGET_POLL,
-            detect_hz: 0.0,
-            render_hz: 0.0,
+            listener: listen::Listener::spawn(&data_dir.join("moonshine"), context),
+            heard_generation: 0,
+            rates: Rates::default(),
             reports: 0,
-            detector: spawn_detector(context),
-            last_detect: Instant::now(),
-            shown_generation: 0,
-            detections: 0,
-            detect_latency_ms: 0.0,
-            surface,
-            source,
-            camera_model,
-            camera_active: true,
-            grade,
             start: Instant::now(),
             last_submit: None,
             frames: 0,
             last_report: Instant::now(),
+            data_dir,
+            package: config.package,
         }
     }
 
     /// The left passthrough camera, or the test pattern if it will not
     /// open: a missing permission should look like "no camera", not like a
     /// crash or a black screen.
-    fn open_camera() -> (Box<dyn FrameSource>, Option<CameraModel>) {
-        match camera::PassthroughCamera::new(Eye::Left, CAPTURE_SIZE) {
+    fn open_camera(package: &str) -> (Box<dyn FrameSource>, Option<CameraModel>) {
+        let size = (CAPTURE_SIZE[0] as i32, CAPTURE_SIZE[1] as i32);
+        match camera::PassthroughCamera::new(Eye::Left, size) {
             Ok(camera) => {
                 let model = camera_model(camera.calibration());
                 (Box::new(camera), model)
@@ -510,28 +514,24 @@ impl App {
             Err(e) => {
                 warn!(
                     "camera unavailable ({e}); showing the test pattern. Grant it with: \
-                     adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA"
+                     adb shell pm grant {package} horizonos.permission.HEADSET_CAMERA"
                 );
                 (
-                    Box::new(TestPattern::new(
-                        CAPTURE_SIZE.0 as u32,
-                        CAPTURE_SIZE.1 as u32,
-                    )),
+                    Box::new(TestPattern::new(CAPTURE_SIZE[0], CAPTURE_SIZE[1])),
                     None,
                 )
             }
         }
     }
 
-    /// Hold the camera only while focused. Android revokes it from
-    /// background apps anyway, and a headset camera should not keep
-    /// streaming to an app the wearer has left.
-    fn set_camera_active(&mut self, active: bool) {
+    /// Sense only while focused. Android revokes the camera from background
+    /// apps anyway, and a headset should not keep watching or listening for
+    /// an app the wearer has left.
+    fn set_active(&mut self, active: bool) {
         if active == self.camera_active {
             return;
         }
         self.camera_active = active;
-        // The microphone, like the camera, only while focused.
         if let Some(ref listener) = self.listener {
             listener.set_listening(active);
         }
@@ -560,13 +560,10 @@ impl App {
             }
         }
         if active {
-            (self.source, self.camera_model) = Self::open_camera();
+            (self.source, self.camera_model) = Self::open_camera(self.package);
         } else {
             info!("releasing the camera on focus loss");
-            self.source = Box::new(TestPattern::new(
-                CAPTURE_SIZE.0 as u32,
-                CAPTURE_SIZE.1 as u32,
-            ));
+            self.source = Box::new(TestPattern::new(CAPTURE_SIZE[0], CAPTURE_SIZE[1]));
         }
     }
 
@@ -594,7 +591,7 @@ impl App {
         let mut environment_changed = false;
         if let Some(depth) = self.resample.read() {
             // Once per run: the app cannot remove the flag.
-            if !self.dumped_depth && std::path::Path::new(DUMP_DEPTH_PATH).exists() {
+            if !self.dumped_depth && self.data_dir.join("dump_depth").exists() {
                 dump_depth(&depth, &self.resample_head);
                 self.dumped_depth = true;
             }
@@ -661,13 +658,10 @@ impl App {
             encoder.end_xr_depth(&image);
             self.resample_head = head;
         }
-        if let Some(camera_frame) = self.source.next_frame() {
-            // The compositor draws the world under passthrough; the camera
-            // image only feeds detection then.
-            if !layered {
-                self.grade_pass.upload(context, encoder, camera_frame);
-            }
-            // Offer the frame for detection; a busy worker drops it.
+
+        let camera_frame = self.source.next_frame();
+        if let Some(camera_frame) = camera_frame {
+            // Offer the frame to the models; a busy one drops it.
             if let Some(worker) = &self.detector
                 && self.last_detect.elapsed() >= DETECT_INTERVAL
                 && worker.submit(camera_frame)
@@ -682,32 +676,17 @@ impl App {
             }
         }
         let mut tracks_changed = false;
-        // The previous submission has completed (waited on above), so the
-        // box buffer is free to rewrite.
         if let Some(worker) = &self.detector
             && worker.generation() != self.shown_generation
             && let Some(observation) = worker.latest()
         {
             self.shown_generation = worker.generation();
             self.detections += 1;
-            self.detect_latency_ms = observation.latency_ms;
+            self.rates.detect_latency_ms = observation.latency_ms;
             self.tracks = observation.tracks;
-            // Debug boxes only while scanning everything; a named target
-            // gets the HUD's brackets instead.
-            let boxes: Vec<_> = if self.hud.targeting.target().is_some() {
-                Vec::new()
-            } else {
-                self.tracks
-                    .iter()
-                    .filter(|t| t.is_confirmed(CONFIRM_HITS))
-                    .map(|t| {
-                        BoxInstance::new(&t.rect, red_eye::hud::outline_color(t.label.category()))
-                    })
-                    .collect()
-            };
-            self.box_pass.set_boxes(context, &boxes);
             tracks_changed = true;
         }
+        let mut depth_changed = false;
         if let Some(depth) = &self.depth
             && depth.generation() != self.depth_generation
             && let Some(map) = depth.latest()
@@ -715,55 +694,41 @@ impl App {
             self.depth_generation = depth.generation();
             self.depths += 1;
             self.depth_map = Some(map);
-            tracks_changed = true;
+            depth_changed = true;
         }
-        if tracks_changed || environment_changed {
-            self.update_ranges();
-        }
-        // The previous submission has completed, so the wireframe's staging
-        // buffers are free to rewrite.
-        if tracks_changed {
-            self.update_wireframe(context, encoder);
+        let (mut heard, mut speaking) = (None, false);
+        if let Some(ref listener) = self.listener {
+            speaking = listener.speaking();
+            if listener.generation() != self.heard_generation {
+                self.heard_generation = listener.generation();
+                heard = listener.latest();
+            }
         }
 
-        let time = self.start.elapsed().as_secs_f32();
-        if self.last_target_poll.elapsed() >= TARGET_POLL {
-            self.last_target_poll = Instant::now();
-            if let Some(target) = read_target(&mut self.target_file) {
-                self.hud.set_target(target, time);
-            }
-        }
-        if let Some(ref listener) = self.listener {
-            self.hud.voice.speaking = listener.speaking();
-            if listener.generation() != self.heard_generation
-                && let Some(heard) = listener.latest()
-            {
-                self.heard_generation = listener.generation();
-                if heard.accepted {
-                    match heard.recognition.command {
-                        Command::Track(label) => self.hud.set_target(Some(label), time),
-                        Command::Cancel => self.hud.set_target(None, time),
-                    }
-                }
-                self.hud.voice.heard = Some((heard.recognition.phrase, heard.accepted, time));
-            }
-        }
-        // Lay out the HUD once; each eye composites it.
-        let telemetry = Telemetry {
-            render_hz: self.render_hz,
-            detect_hz: self.detect_hz,
-            latency_ms: self.detect_latency_ms,
+        let senses = Senses {
+            time: self.start.elapsed().as_secs_f32(),
+            passthrough: layered,
+            frame: camera_frame,
+            camera: self.camera_model.as_ref(),
+            tracks: &self.tracks,
+            tracks_changed,
+            depth: self.depth_map.as_ref(),
+            depth_changed,
+            environment: self.environment_depth.as_ref(),
+            environment_changed,
+            heard,
+            speaking,
+            rates: self.rates,
         };
-        let (hud, tracks) = (&mut self.hud, &self.tracks);
-        self.hud_canvas.render(context, encoder, time as f64, |ui| {
-            hud.draw(ui, time, tracks, &telemetry)
-        });
+        self.vision.update(context, encoder, &senses);
+
         // Under passthrough, clear to nothing so the world shows through.
         let clear = if layered {
             gpu::TextureColor::TransparentBlack
         } else {
             gpu::TextureColor::OpaqueBlack
         };
+        let extent = self.surface.extent();
         for &(ref xr_view, view) in &views {
             let fov = [
                 xr_view.fov.angle_left,
@@ -785,35 +750,26 @@ impl App {
             );
             let placement = match self.camera_model {
                 Some(ref camera) => {
-                    projection::placement(camera, &eye, fov, self.placement_distance)
+                    projection::placement(camera, &eye, fov, self.vision.placement_distance())
                 }
                 None => eye_placement(fov),
             };
-            if !layered {
-                self.grade_pass
-                    .draw(&mut pass, &self.grade, placement, time, self.linear_target);
-            }
-            let extent = self.surface.extent();
-            self.box_pass.draw(
+            self.vision.draw(
                 &mut pass,
-                placement,
-                [extent.width, extent.height],
-                BOX_THICKNESS,
+                &EyeView {
+                    placement,
+                    extent: [extent.width, extent.height],
+                    linear_target: self.linear_target,
+                    passthrough: layered,
+                },
             );
-            if let Some(ref style) = self.wireframe_style {
-                self.wireframe
-                    .draw(&mut pass, placement, style, self.linear_target);
-            }
-            // Placed like the camera image, so track rectangles line up.
-            self.hud_canvas
-                .composite(&mut pass, placement, self.linear_target, 1.0);
         }
 
         match output {
             Output::Layered { frame, image } => {
                 encoder.end_xr_image(&image);
                 let sync = context.submit(encoder);
-                self.hud_canvas.after_submit(&sync);
+                self.vision.after_submit(&sync);
                 // The image goes back to the runtime once it is rendered,
                 // before the frame that shows it ends.
                 let _ = context.wait_for(&sync, !0);
@@ -835,137 +791,60 @@ impl App {
             Output::Presented(frame) => {
                 encoder.present(frame);
                 let sync = context.submit(encoder);
-                self.hud_canvas.after_submit(&sync);
+                self.vision.after_submit(&sync);
                 self.last_submit = Some(sync);
             }
         }
         self.frames += 1;
-
-        // Rates refresh every second for the HUD; the log gets every fifth.
-        if self.last_report.elapsed() >= Duration::from_secs(1) {
-            let secs = self.last_report.elapsed().as_secs_f64();
-            self.render_hz = (self.frames as f64 / secs) as f32;
-            self.detect_hz = (self.detections as f64 / secs) as f32;
-            self.depth_hz = (self.depths as f64 / secs) as f32;
-            self.depths = 0;
-            self.reports += 1;
-            if self.reports.is_multiple_of(5) {
-                // What the headset senses straight ahead, a sanity check.
-                let ahead = self.environment_depth.as_ref().and_then(|(depth, head)| {
-                    let direction = projection::rotate(head.orientation, [0.0, 0.0, -1.0]);
-                    depth.along(0, head.position, direction)
-                });
-                // Which way up the depth image is, judged by the camera.
-                if let (Some((depth, head)), Some(camera), Some(relative)) =
-                    (&self.environment_depth, &self.camera_model, &self.depth_map)
-                {
-                    let agree =
-                        |d: &EnvironmentDepth| environment::agreement(d, camera, head, relative);
-                    info!(
-                        "environment depth agrees with the camera: rows top-down {:.2?},                          bottom-up {:.2?}",
-                        agree(depth),
-                        agree(&depth.flipped())
-                    );
-                }
-                info!(
-                    "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | depth {:.1} Hz | \
-                     ahead {ahead:.2?} m, plane {:.2} m, ranges {:.1?} | {:?}",
-                    self.render_hz,
-                    self.detect_hz,
-                    self.detect_latency_ms,
-                    self.depth_hz,
-                    self.placement_distance,
-                    self.hud.ranges.values().collect::<Vec<_>>(),
-                    self.hud.targeting.phase(),
-                );
-            }
-            self.frames = 0;
-            self.detections = 0;
-            self.last_report = Instant::now();
-        }
+        self.report();
     }
 
-    /// The object the HUD is about: the matched target when there is one,
-    /// else the one the wearer faces.
-    fn outlined(&self) -> Option<&Track> {
-        let target = match self.hud.targeting.phase() {
-            red_eye::hud::targeting::Phase::Match { track, .. } => {
-                self.tracks.iter().find(|t| t.id == track)
-            }
-            _ => None,
-        };
-        // Without eye tracking, the wearer's focus is where the head points.
-        let focus = self
-            .camera_model
-            .and_then(|camera| camera.focus(self.placement_distance))
-            .unwrap_or([0.5, 0.5]);
-        target.or_else(|| track::focused(&self.tracks, focus, CONFIRM_HITS))
-    }
-
-    /// Range every confirmed track through the headset's depth, and move
-    /// the placement plane to the outlined object.
-    fn update_ranges(&mut self) {
-        let (Some((depth, head)), Some(camera)) = (&self.environment_depth, &self.camera_model)
-        else {
+    /// Rates refresh every second for the HUD; the log gets every fifth.
+    fn report(&mut self) {
+        if self.last_report.elapsed() < Duration::from_secs(1) {
             return;
-        };
-        let mut ranges = std::collections::HashMap::new();
-        let mut placement = None;
-        let outlined = self.outlined().map(|t| t.id);
-        for t in self.tracks.iter().filter(|t| t.is_confirmed(CONFIRM_HITS)) {
-            let Some((camera_depth, point)) =
-                environment::object_depth(depth, camera, head, t.rect)
-            else {
-                continue;
-            };
-            let offset = [0, 1, 2].map(|i| point[i] - head.position[i]);
-            let range = offset.iter().map(|v| v * v).sum::<f32>().sqrt();
-            let smoothed = match self.hud.ranges.get(&t.id) {
-                Some(&old) => old + RANGE_SMOOTHING * (range - old),
-                None => range,
-            };
-            ranges.insert(t.id, smoothed);
-            if Some(t.id) == outlined {
-                placement = Some(camera_depth);
-            }
         }
-        self.hud.ranges = ranges;
-        if let Some(target) = placement {
-            let target = target.clamp(*PLACEMENT_RANGE.start(), *PLACEMENT_RANGE.end());
-            self.placement_distance += RANGE_SMOOTHING * (target - self.placement_distance);
+        let secs = self.last_report.elapsed().as_secs_f64();
+        self.rates.render_hz = (self.frames as f64 / secs) as f32;
+        self.rates.detect_hz = (self.detections as f64 / secs) as f32;
+        self.rates.depth_hz = (self.depths as f64 / secs) as f32;
+        (self.frames, self.detections, self.depths) = (0, 0, 0);
+        self.last_report = Instant::now();
+        self.reports += 1;
+        if !self.reports.is_multiple_of(5) {
+            return;
         }
-    }
-
-    /// Outline one object: the matched target when there is one, else the
-    /// one the wearer faces. Contours on everything at once read as noise,
-    /// and the wireframe is the HUD saying "this one". Its silhouette is cut
-    /// from its box by depth, and the contours spaced over its depth range.
-    fn update_wireframe(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder) {
-        let Some(ref depth) = self.depth_map else {
-            return;
-        };
-        let chosen = self.outlined();
-        let boxes: Vec<(u8, red_eye::perception::Rect)> =
-            chosen.map(|t| (1, t.rect)).into_iter().collect();
-        let highlight = 1;
-        let mask: Mask = dense::silhouettes(&boxes, depth, MASK_SIZE[0], MASK_SIZE[1]);
-        let Some((lo, hi)) = dense::masked_range(&mask, depth) else {
-            self.wireframe_style = None;
-            return;
-        };
-        self.wireframe.upload(context, encoder, &mask, depth);
-        let time = self.start.elapsed().as_secs_f32();
-        self.wireframe_style = Some(WireframeStyle {
-            spacing: ((hi - lo) / CONTOURS).max(1e-3),
-            // A slow drift, for the scanning look.
-            phase: (time * 0.25).fract(),
-            highlight,
-            ..WireframeStyle::default()
+        // What the headset senses straight ahead, a sanity check.
+        let ahead = self.environment_depth.as_ref().and_then(|(depth, head)| {
+            let direction = projection::rotate(head.orientation, [0.0, 0.0, -1.0]);
+            depth.along(0, head.position, direction)
         });
+        // Which way up the depth image is, judged by the camera.
+        if let (Some((depth, head)), Some(camera), Some(relative)) =
+            (&self.environment_depth, &self.camera_model, &self.depth_map)
+        {
+            let agree = |d: &EnvironmentDepth| environment::agreement(d, camera, head, relative);
+            info!(
+                "environment depth agrees with the camera: rows top-down {:.2?}, bottom-up {:.2?}",
+                agree(depth),
+                agree(&depth.flipped())
+            );
+        }
+        let r = self.rates;
+        info!(
+            "render {:.1} Hz | detect {:.1} Hz, latency {:.1} ms | depth {:.1} Hz | \
+             ahead {ahead:.2?} m | {}",
+            r.render_hz,
+            r.detect_hz,
+            r.detect_latency_ms,
+            r.depth_hz,
+            self.vision.status(),
+        );
     }
 
     fn destroy(mut self, context: &gpu::Context) {
-        // Join the worker first: it holds the context and may be mid-submit.
+        // Join the workers first: they hold the context and may be
+        // mid-submit.
         drop(self.detector.take());
         drop(self.depth.take());
         drop(self.listener.take());
@@ -979,10 +858,7 @@ impl App {
             context.destroy_xr_environment_depth(&mut environment);
         }
         self.resample.destroy(context);
-        self.grade_pass.destroy(context);
-        self.box_pass.destroy(context);
-        self.wireframe.destroy(context);
-        self.hud_canvas.destroy(context);
+        self.vision.destroy(context);
         context.destroy_xr_surface(&mut self.surface);
     }
 }
@@ -1001,15 +877,17 @@ fn spawn_event_pump() -> Arc<AtomicBool> {
     should_exit
 }
 
-#[ndk_glue::main]
-pub fn main() {
+/// Run `V` until the activity is destroyed: the app's whole life. Call it
+/// from the `#[ndk_glue::main]` function of the vision's crate.
+pub fn run<V: Vision>() {
+    let config = V::config();
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
-            .with_tag("red_eye"),
+            .with_tag(config.log_tag),
     );
     std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
-    info!("=== red_eye starting ===");
+    info!("=== {} starting ===", config.name);
 
     let entry = unsafe { xr::Entry::load().expect("no OpenXR loader") };
     entry.initialize_android_loader().unwrap();
@@ -1032,7 +910,7 @@ pub fn main() {
     let xr_instance = entry
         .create_instance(
             &xr::ApplicationInfo {
-                application_name: "RedEye",
+                application_name: config.name,
                 application_version: 0,
                 engine_name: "Blade",
                 engine_version: 0,
@@ -1046,20 +924,20 @@ pub fn main() {
         .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
         .unwrap();
 
-    // One context, shared by the renderer and (soon) by Meganeura.
-    let context = red_eye::init_context(Some(gpu::xr::Desc {
+    // One context, shared by the renderer and Meganeura.
+    let context = mar_core::init_context(Some(gpu::xr::Desc {
         instance: xr_instance.clone(),
         system_id: system,
     }))
     .expect("failed to initialize GPU context");
 
     let mut encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
-        name: "red_eye",
+        name: config.log_tag,
         buffer_count: 2,
         manual_barriers: false,
     });
 
-    let mut app: Option<App> = None;
+    let mut shell: Option<Shell<V>> = None;
     let should_exit = spawn_event_pump();
     let mut events = xr::EventDataBuffer::new();
 
@@ -1075,25 +953,25 @@ pub fn main() {
                     info!("XR session state: {:?}", e.state());
                     match e.state() {
                         xr::SessionState::READY => {
-                            if app.is_none() {
-                                app = Some(App::new(&context));
+                            if shell.is_none() {
+                                shell = Some(Shell::new(&context, &config));
                             }
                             context.xr_session().unwrap().begin(VIEW_TYPE).unwrap();
                         }
                         xr::SessionState::STOPPING => {
                             context.xr_session().unwrap().end().unwrap();
-                            if let Some(app) = app.take() {
-                                app.destroy(&context);
+                            if let Some(shell) = shell.take() {
+                                shell.destroy(&context);
                             }
                         }
                         xr::SessionState::VISIBLE | xr::SessionState::SYNCHRONIZED => {
-                            if let Some(app) = app.as_mut() {
-                                app.set_camera_active(false);
+                            if let Some(shell) = shell.as_mut() {
+                                shell.set_active(false);
                             }
                         }
                         xr::SessionState::FOCUSED => {
-                            if let Some(app) = app.as_mut() {
-                                app.set_camera_active(true);
+                            if let Some(shell) = shell.as_mut() {
+                                shell.set_active(true);
                             }
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => break 'main,
@@ -1105,16 +983,16 @@ pub fn main() {
             }
         }
 
-        match &mut app {
-            Some(app) => app.render(&context, &mut encoder),
+        match &mut shell {
+            Some(shell) => shell.render(&context, &mut encoder),
             // Not in session yet; idle rather than spin.
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     }
 
-    if let Some(app) = app.take() {
-        app.destroy(&context);
+    if let Some(shell) = shell.take() {
+        shell.destroy(&context);
     }
     context.destroy_command_encoder(&mut encoder);
-    info!("=== red_eye stopped ===");
+    info!("=== {} stopped ===", config.name);
 }

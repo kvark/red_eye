@@ -1,0 +1,22 @@
+[package]
+name = "mar-shell"
+description = "The XR app every MAR vision runs in: session, passthrough, camera, microphone and the perception threads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Android only: on other targets the crate is empty, so the workspace still
+# builds and lints on a desktop.
+[target.'cfg(target_os = "android")'.dependencies]
+mar-core.workspace = true
+blade-graphics.workspace = true
+openxr.workspace = true
+ndk-glue.workspace = true
+android_logger.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

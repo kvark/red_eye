@@ -1,20 +1,25 @@
-//! RedEye: T-800 style augmented vision for Meta Quest 3.
+//! MAR core: what every vision shares.
 //!
-//! Passthrough is graded red, perception models run on the headset through
-//! Meganeura, and a HUD built from the films' visual grammar is drawn over
-//! the world with Blade. Everything is local; nothing leaves the device.
+//! MAR (movie augmented reality) puts visions from films over the world on
+//! a Meta Quest: perception models run on the headset through Meganeura,
+//! and overlays are drawn with Blade over the system's passthrough.
+//! Everything is local; nothing leaves the device. Each vision is an app of
+//! its own on `mar-shell`, the XR app they all run in; this crate is
+//! everything they share, and builds and tests on a desktop.
 //!
 //! # Layout
 //!
 //! * [`frame`] — the camera frame type (YUV420, as Camera2 delivers it).
-//! * [`source`] — frame sources: test pattern, still image, and on Android
-//!   the passthrough camera.
-//! * [`grade`] — the red colour grade, shared by the shader and the
-//!   passthrough colour map.
-//! * [`render`] — Blade passes.
-//! * [`perception`] — model outputs, tracking, and the observation the HUD
-//!   reads.
-//! * [`hud`] — the mechanics from `docs/concept.md`, as time-driven state.
+//! * [`source`] — frame sources: test pattern and still image; the
+//!   passthrough camera is in `mar-shell`.
+//! * [`grade`] — a colour grade of the camera's luminance, shared by the
+//!   shader and the passthrough colour map.
+//! * [`projection`] — the camera's model, and placing what it saw in an eye.
+//! * [`render`] — Blade passes: the graded camera, boxes, depth contours.
+//! * [`perception`] — detectors, tracking, depth (monocular and the
+//!   headset's own), masks.
+//! * [`voice`] — voice commands, from utterance to command.
+//! * [`hud`] — building blocks for a HUD: the canvas, text, effects.
 //!
 //! # Sharing one GPU context
 //!

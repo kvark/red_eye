@@ -1,23 +1,40 @@
 [package]
-name = "red-eye-xr"
-version = "0.1.0"
-publish = false
-edition = "2024"
+name = "red-eye"
+description = "RedEye: T-800 style augmented vision, a MAR app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
+# A cdylib for the APK, and an rlib so the HUD's example and tests build on
+# a desktop.
 [lib]
-name = "red_eye_xr"
-path = "src/lib.rs"
-crate-type = ["cdylib"]
+name = "red_eye"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mar-core.workspace = true
+blade-graphics.workspace = true
+egui.workspace = true
+log.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
-red-eye = { path = ".." }
-blade-graphics = { version = "0.9", git = "https://github.com/kvark/blade", rev = "7569282e1f06d34b44f2cdb030b72fc8ec56a417" }
-openxr = "0.21"
-ndk-glue = "0.7"
-android_logger = "0.14"
-log = "0.4"
+mar-shell.workspace = true
+ndk-glue.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true
 
 [package.metadata.android]
+# The package name RedEye has always had, so installs, grants and the adb
+# commands in the docs carry over.
+package = "rust.red_eye_xr"
 build_targets = ["aarch64-linux-android"]
 # libopenxr_loader.so lives here; Blade's Android examples ship it.
 runtime_libs = "../../blade/examples-android/libs"

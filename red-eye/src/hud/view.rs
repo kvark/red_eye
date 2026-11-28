@@ -1,4 +1,4 @@
-//! The HUD's look: Terminator 2's layout, drawn on the [`super::canvas`].
+//! The HUD's look: Terminator 2's layout, drawn on the [`mar_core::hud::canvas`].
 //!
 //! - Labelled number blocks in the top corners: filler digits that churn,
 //!   as in the films, interleaved with real telemetry.
@@ -16,10 +16,10 @@
 
 use egui::{Color32, Pos2, Rect, Vec2, pos2, vec2};
 
-use super::grid;
 use super::targeting::{Phase, Targeting};
-use super::text::Typewriter;
-use crate::perception::track::{Track, TrackId};
+use mar_core::hud::grid;
+use mar_core::hud::text::Typewriter;
+use mar_core::perception::track::{Track, TrackId};
 
 /// Telemetry the number blocks report alongside their filler.
 #[derive(Clone, Copy, Debug, Default)]
@@ -148,7 +148,7 @@ fn digits(row: u32, groups: u32, tick: u32) -> String {
 }
 
 impl Hud {
-    pub fn set_target(&mut self, target: Option<crate::perception::Label>, now: f32) {
+    pub fn set_target(&mut self, target: Option<mar_core::perception::Label>, now: f32) {
         self.targeting.set_target(target, now);
     }
 

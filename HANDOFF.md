@@ -31,7 +31,7 @@ picking the work up.
     masks).
   - Tracker, targeting and text effects (unit tests).
 - **Compiles but has never run:**
-  - the whole `android-xr` app (clippy-clean for `aarch64-linux-android`);
+  - the shell and the RedEye app (`mar-shell`, `red-eye`) (clippy-clean for `aarch64-linux-android`);
   - its Camera2 module (ported from DinoVision, where the original ran on a
     Quest 3);
   - the HUD and detectors on Adreno.
@@ -54,7 +54,7 @@ Android:
 - Android SDK with platform 34, NDK r27, and `ANDROID_HOME` /
   `ANDROID_NDK_HOME` set for cargo-apk. Horizon OS's camera API needs API 34.
 - **Clone Blade next to this repository** (`../blade`).
-  `android-xr/Cargo.toml` takes the OpenXR loader from
+  `red-eye/Cargo.toml` takes the OpenXR loader from
   `../blade/examples-android/libs` and the debug keystore from
   `../blade/examples-android/keystore/`, as DinoVision does.
 - A Quest 3 in developer mode with USB debugging; `adb devices` lists it.
@@ -65,7 +65,7 @@ Android:
 adb shell mkdir -p /data/local/tmp/red_eye
 adb push ref/dfine_nano_640x480/model.onnx /data/local/tmp/red_eye/dfine_nano.onnx
 adb push ref/yolox_nano.safetensors /data/local/tmp/red_eye/
-cargo apk run --manifest-path android-xr/Cargo.toml --release --no-logcat   # builds, installs, starts
+cargo apk run --manifest-path red-eye/Cargo.toml --release --lib --no-logcat   # builds, installs, starts
 adb shell pm grant rust.red_eye_xr horizonos.permission.HEADSET_CAMERA     # after each fresh install
 adb shell pm grant rust.red_eye_xr com.oculus.permission.USE_SCENE         # the headset's depth
 adb shell am force-stop rust.red_eye_xr
@@ -89,7 +89,7 @@ Expected, in order:
    enabled.
 3. **The red camera image in both eyes, fusing into one view.** If the eyes
    disagree or the image looks offset, see `eye_placement` in
-   `android-xr/src/lib.rs`: Quest frusta are asymmetric, and DinoVision
+   `mar-shell/src/lib.rs`: Quest frusta are asymmetric, and DinoVision
    documents the measurements and has a camera half-FOV override.
 4. `detector ready: D-FINE-N at 640x480 …` (or YOLOX-Nano if the D-FINE
    model is absent). Every 5 s:
@@ -119,7 +119,7 @@ budget, risks) and TASKS.md item 8:
   Meganeura item 3).
 - **The render rate drops while detecting.** Inference and rendering share
   one Vulkan queue. The knobs are `SUBMISSION_CHUNKS` and `DETECT_INTERVAL`
-  in `android-xr/src/lib.rs`.
+  in `mar-shell/src/lib.rs`.
 - **Colours washed out or too dark.** The grade, HUD and wireframe convert
   to linear when the swapchain format is sRGB (`is_srgb`). Check the logged
   format.

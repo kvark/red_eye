@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use blade_graphics as gpu;
 use log::{info, warn};
-use red_eye::voice::{Grammar, MIN_CONFIDENCE, Moonshine, Recognition, Vad, VadConfig};
+use mar_core::voice::{Grammar, MIN_CONFIDENCE, Moonshine, Recognition, Vad, VadConfig};
 
 use crate::microphone::Microphone;
 

@@ -65,7 +65,7 @@ Next:
 ## 3. Voice control: "track the motorcycle"
 
 **Status: done** on the Quest's model side, and wired into the app
-(`voice`, `android-xr/src/listen.rs`); not yet heard through the headset's
+(`mar_core::voice`, `mar-shell/src/listen.rs`); not yet heard through the headset's
 own microphone. Meganeura PR #400 (integer inputs, InstanceNormalization)
 is pinned by commit until it merges.
 

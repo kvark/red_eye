@@ -14,12 +14,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use red_eye::frame::{Eye, Frame};
-use red_eye::grade::Grade;
-use red_eye::perception::Detector;
-use red_eye::perception::dfine::Dfine;
-use red_eye::perception::yolox::{Config, Yolox};
-use red_eye::render::BoxInstance;
+use mar_core::frame::{Eye, Frame};
+use mar_core::grade::Grade;
+use mar_core::perception::Detector;
+use mar_core::perception::dfine::Dfine;
+use mar_core::perception::yolox::{Config, Yolox};
+use mar_core::render::BoxInstance;
 
 fn main() {
     env_logger::init();
@@ -49,7 +49,7 @@ fn main() {
     let frame = Frame::from_rgb8(rgb.width(), rgb.height(), rgb.as_raw(), Eye::Left);
 
     // One context for the detector and the renderer, as on the headset.
-    let context = red_eye::init_context(None).expect("no GPU");
+    let context = mar_core::init_context(None).expect("no GPU");
     let mut detector: Box<dyn Detector> = if weights.ends_with(".onnx") {
         Box::new(
             Dfine::new(Path::new(&weights), [640, 480], Some(context.clone())).expect("D-FINE"),
@@ -80,9 +80,9 @@ fn main() {
 
     let boxes: Vec<_> = detections
         .iter()
-        .map(|d| BoxInstance::new(&d.rect, red_eye::hud::outline_color(d.label.category())))
+        .map(|d| BoxInstance::new(&d.rect, color(d.label.category())))
         .collect();
-    let pixels = red_eye::render::render_graded(&context, &frame, &Grade::t2(), 0.0, &boxes);
+    let pixels = mar_core::render::render_graded(&context, &frame, &Grade::t2(), 0.0, &boxes);
     if let Some(dir) = Path::new(&output).parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
@@ -91,4 +91,16 @@ fn main() {
         .save(&output)
         .unwrap();
     println!("wrote {output}");
+}
+
+/// A plain colour per category, so classes tell apart at a glance; each
+/// vision has its own palette.
+fn color(category: mar_core::perception::Category) -> [f32; 4] {
+    use mar_core::perception::Category;
+    match category {
+        Category::Person => [1.0, 1.0, 1.0, 1.0],
+        Category::Vehicle => [0.4, 0.9, 1.0, 1.0],
+        Category::Animal => [1.0, 0.85, 0.5, 1.0],
+        Category::Object => [1.0, 0.6, 0.5, 0.8],
+    }
 }

@@ -6,7 +6,7 @@
 
 use std::ffi::{CStr, c_char, c_void};
 
-use red_eye::voice::vad::{self, SAMPLE_RATE};
+use mar_core::voice::vad::{self, SAMPLE_RATE};
 
 #[repr(C)]
 struct AAudioStreamBuilder([u8; 0]);
@@ -95,8 +95,8 @@ impl Microphone {
             AAudioStreamBuilder_delete(builder);
             if result != AAUDIO_OK || stream.is_null() {
                 return Err(format!(
-                    "{}; is RECORD_AUDIO granted? adb shell pm grant rust.red_eye_xr \
-                     android.permission.RECORD_AUDIO",
+                    "{}; is android.permission.RECORD_AUDIO granted? \
+                     adb shell pm grant <package> android.permission.RECORD_AUDIO",
                     describe(result)
                 ));
             }

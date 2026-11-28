@@ -1,10 +1,10 @@
-//! The HUD: the films' visual grammar as time-driven state.
+//! RedEye's HUD: the films' visual grammar as time-driven state.
 //!
 //! Each [`Mechanic`] is one formalised behaviour from `docs/concept.md`.
 //! The HUD owns per-target state (keyed by
-//! [`crate::perception::track::TrackId`]) and per-mechanic timers, reads the
-//! latest [`crate::perception::Observation`], and emits draw primitives.
-//! Drawing stays in [`crate::render`].
+//! [`mar_core::perception::track::TrackId`]) and per-mechanic timers, reads
+//! the latest tracks, and lays itself out on a
+//! [`mar_core::hud::canvas::Canvas`].
 //!
 //! Layout follows Terminator 2's grammar: labelled number blocks in the
 //! corners, a left-aligned status stack mid-right, one large state word
@@ -12,18 +12,20 @@
 //! locked, lazily following the head, with text kept within about ±25° of
 //! centre; a rigidly head-locked HUD is uncomfortable.
 
-pub mod canvas;
-pub mod grid;
 pub mod targeting;
-pub mod text;
 pub mod view;
 
 pub use view::{Hud, Telemetry, Voice};
 
+use blade_graphics as gpu;
+use mar_core::hud::canvas::Canvas;
+use mar_core::perception::track::Track;
+use mar_core::render::{Overlay, Placement};
+
 /// The mechanics catalogued in `docs/concept.md`, in its order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mechanic {
-    /// M1: the whole view mapped luminance to red. [`crate::grade`].
+    /// M1: the whole view mapped luminance to red. [`mar_core::grade`].
     ColorGrade,
     /// M2: code listings and labelled number blocks, always running.
     DataScroll,
@@ -56,12 +58,46 @@ pub enum Mechanic {
 /// Outline colour per category for the box view: white for people, as T2
 /// traces its subjects; the films' schematic cyan for vehicles; dimmer
 /// tones for the rest, so people read first.
-pub fn outline_color(category: crate::perception::Category) -> [f32; 4] {
-    use crate::perception::Category;
+pub fn outline_color(category: mar_core::perception::Category) -> [f32; 4] {
+    use mar_core::perception::Category;
     match category {
         Category::Person => [1.0, 1.0, 1.0, 1.0],
         Category::Vehicle => [0.45, 0.95, 1.0, 1.0],
         Category::Animal => [1.0, 0.85, 0.55, 0.9],
         Category::Object => [1.0, 0.6, 0.55, 0.7],
+    }
+}
+
+/// One HUD frame as a [`mar_core::render::Overlay`]: lays out `hud` on the
+/// canvas before the pass and composites it within.
+pub struct HudOverlay<'a> {
+    pub canvas: &'a mut Canvas,
+    pub hud: &'a mut Hud,
+    /// Seconds, the HUD's clock.
+    pub now: f32,
+    pub tracks: &'a [Track],
+    pub telemetry: Telemetry,
+}
+
+impl Overlay for HudOverlay<'_> {
+    fn prepare(&mut self, context: &gpu::Context, encoder: &mut gpu::CommandEncoder) {
+        let (hud, now, tracks, telemetry) =
+            (&mut *self.hud, self.now, self.tracks, &self.telemetry);
+        self.canvas.render(context, encoder, now as f64, |ui| {
+            hud.draw(ui, now, tracks, telemetry)
+        });
+    }
+
+    fn draw(
+        &self,
+        pass: &mut gpu::RenderCommandEncoder,
+        placement: Placement,
+        linear_target: bool,
+    ) {
+        self.canvas.composite(pass, placement, linear_target, 1.0);
+    }
+
+    fn submitted(&mut self, sync_point: &gpu::SyncPoint) {
+        self.canvas.after_submit(sync_point);
     }
 }

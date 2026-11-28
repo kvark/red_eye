@@ -1,17 +1,21 @@
-[package]
-name = "red-eye"
+# MAR, movie augmented reality: visions from films on a Meta Quest, on
+# Blade and Meganeura. `mar-core` is what every vision shares, `mar-shell`
+# the XR app they run in, and each vision is an app of its own.
+[workspace]
+members = ["mar-core", "mar-shell", "red-eye"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "T-800 style augmented vision for Meta Quest 3, on Blade and Meganeura"
 license = "MIT"
 repository = "https://github.com/kvark/red_eye"
 publish = false
 
-[workspace]
-members = ["android-xr"]
-
-[dependencies]
+[workspace.dependencies]
+mar-core = { path = "mar-core" }
+mar-shell = { path = "mar-shell" }
 # Pinned to the exact blade-graphics revision meganeura depends on. Both
 # crates must resolve to the *same* blade-graphics so the
 # `Arc<blade_graphics::Context>` the renderer creates is the type
@@ -27,32 +31,17 @@ egui = { version = "0.34", features = ["bytemuck"] }
 blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-
-[dev-dependencies]
+# The Android side: the OpenXR version Blade uses.
+openxr = "0.21"
+ndk-glue = "0.7"
+android_logger = "0.14"
+# Host tools and tests.
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 too_many_arguments = "allow"
 new_without_default = "allow"
-
-[[example]]
-name = "preview"
-path = "examples/preview.rs"
-
-[[example]]
-name = "detect"
-path = "examples/detect.rs"
-
-[[example]]
-name = "onnx_check"
-path = "examples/onnx_check.rs"
-
-[[example]]
-name = "hud"
-path = "examples/hud.rs"
-
-

@@ -81,42 +81,147 @@ impl DepthMap {
 /// Silhouettes of boxed objects, cut out of their boxes by depth.
 ///
 /// A detector gives boxes, which hold background as well as the object.
-/// Depth separates them: within each box, the pixels nearer than the box's
-/// median (larger, for inverse depth) are taken as the object, which holds
-/// whenever the object fills a good part of its box and stands in front of
-/// what is behind it. Boxes are painted largest first, so a small object in
-/// front of a large one keeps its own id. Ids are each box's `id`.
+/// The object is the surface at the box's centre, where the detector puts
+/// it: grown from there across pixels whose depth changes smoothly, and
+/// stopped where depth jumps, at the object's edge. Depth Anything's edges
+/// are sharp, so this follows the object however much of its box it fills,
+/// and leaves out whatever else stands in the box. Cutting at the box's
+/// median depth instead lost the far half of anything filling its box, and
+/// kept anything near at the box's sides.
+///
+/// Boxes are painted largest first, so a small object in front of a large
+/// one keeps its own id. Ids are each box's `id`.
 pub fn silhouettes(boxes: &[(u8, super::Rect)], depth: &DepthMap, width: u32, height: u32) -> Mask {
     let mut mask = Mask::new(width, height);
     let mut order: Vec<&(u8, super::Rect)> = boxes.iter().collect();
     let area = |r: &super::Rect| (r.max[0] - r.min[0]) * (r.max[1] - r.min[1]);
     order.sort_by(|a, b| area(&b.1).total_cmp(&area(&a.1)));
-    let inside = |r: &super::Rect, u: f32, v: f32| {
-        u >= r.min[0] && u < r.max[0] && v >= r.min[1] && v < r.max[1]
-    };
     for &&(id, rect) in &order {
-        let mut values = Vec::new();
-        for y in 0..height {
-            for x in 0..width {
-                let (u, v) = (
-                    (x as f32 + 0.5) / width as f32,
-                    (y as f32 + 0.5) / height as f32,
-                );
-                if inside(&rect, u, v) {
-                    values.push(depth.sample(u, v));
-                }
-            }
+        for index in silhouette(rect, depth, width, height) {
+            mask.ids[index] = id;
         }
-        if values.is_empty() {
-            continue;
-        }
-        values.sort_by(f32::total_cmp);
-        let median = values[values.len() / 2];
-        mask.paint(id, |u, v| {
-            inside(&rect, u, v) && depth.sample(u, v) >= median
-        });
     }
     mask
+}
+
+/// The largest step in depth between neighbouring pixels that is still the
+/// same surface, as a share of the box's spread of depth: well above a
+/// surface's own slope from pixel to pixel, well below the jump at an edge.
+const EDGE: f32 = 0.05;
+
+/// How far past its seeds toward its surroundings (the box's border) an
+/// object may reach, as a share of the way: a surface leaning back, but
+/// not the floor it stands on running off behind it, which is how growth
+/// otherwise leaks from an object into its support and on to what stands
+/// behind.
+const REACH: f32 = 0.6;
+
+/// One box's object, as indices into a `width` × `height` grid; see
+/// [`silhouettes`].
+fn silhouette(rect: super::Rect, depth: &DepthMap, width: u32, height: u32) -> Vec<usize> {
+    // The box's pixels on the grid, by their centres.
+    let span = |min: f32, max: f32, n: u32| {
+        let first = (min * n as f32 - 0.5).ceil().clamp(0.0, n as f32) as usize;
+        let end = (max * n as f32 - 0.5).ceil().clamp(0.0, n as f32) as usize;
+        (first, end.max(first))
+    };
+    let (x0, x1) = span(rect.min[0], rect.max[0], width);
+    let (y0, y1) = span(rect.min[1], rect.max[1], height);
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let values: Vec<f32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            depth.sample(
+                ((x0 + x) as f32 + 0.5) / width as f32,
+                ((y0 + y) as f32 + 0.5) / height as f32,
+            )
+        })
+        .collect();
+    let quantile = |sorted: &[f32], q: f32| sorted[((sorted.len() - 1) as f32 * q) as usize];
+    let mut sorted = values.clone();
+    sorted.sort_by(f32::total_cmp);
+    let (far, near) = (quantile(&sorted, 0.05), quantile(&sorted, 0.95));
+    // A box of one flat depth is all object.
+    let step = (EDGE * (near - far)).max(1e-6);
+
+    // Seeds: the nearer half of the box's middle third. Objects stand in
+    // front of what is behind them, and a see-through one (a bicycle) shows
+    // background at its centre.
+    let middle = |n: usize| (n / 3, (2 * n).div_ceil(3).max(n / 3 + 1));
+    let ((mx0, mx1), (my0, my1)) = (middle(w), middle(h));
+    let mut central: Vec<(usize, f32)> = (my0..my1)
+        .flat_map(|y| (mx0..mx1).map(move |x| y * w + x))
+        .map(|i| (i, values[i]))
+        .collect();
+    central.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let seeds = &central[central.len() / 2..];
+    let seed_level = seeds[seeds.len() / 2].1;
+    // What surrounds the object: the median of the box's border.
+    let mut border: Vec<f32> = (0..w * h)
+        .filter(|&i| {
+            let (x, y) = (i % w, i / w);
+            x == 0 || y == 0 || x + 1 == w || y + 1 == h
+        })
+        .map(|i| values[i])
+        .collect();
+    border.sort_by(f32::total_cmp);
+    let surroundings = quantile(&border, 0.5).min(seed_level);
+    let floor = seed_level - REACH * (seed_level - surroundings);
+
+    let mut object = vec![false; w * h];
+    let mut queue: std::collections::VecDeque<usize> = seeds.iter().map(|&(i, _)| i).collect();
+    for &(i, _) in seeds {
+        object[i] = true;
+    }
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % w, i / w);
+        let neighbours = [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ];
+        for n in neighbours.into_iter().flatten() {
+            if !object[n] && values[n] >= floor && (values[n] - values[i]).abs() <= step {
+                object[n] = true;
+                queue.push_back(n);
+            }
+        }
+    }
+
+    // Holes: background the box's border cannot reach is inside the object.
+    let mut outside = vec![false; w * h];
+    let mut queue: std::collections::VecDeque<usize> = (0..w * h)
+        .filter(|&i| {
+            let (x, y) = (i % w, i / w);
+            (x == 0 || y == 0 || x + 1 == w || y + 1 == h) && !object[i]
+        })
+        .collect();
+    for &i in &queue {
+        outside[i] = true;
+    }
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % w, i / w);
+        let neighbours = [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ];
+        for n in neighbours.into_iter().flatten() {
+            if !object[n] && !outside[n] {
+                outside[n] = true;
+                queue.push_back(n);
+            }
+        }
+    }
+    (0..w * h)
+        .filter(|&i| !outside[i])
+        .map(|i| (y0 + i / w) * width as usize + x0 + i % w)
+        .collect()
 }
 
 /// The median of `depth` over the pixels `mask` marks, or `None` where it
@@ -176,6 +281,59 @@ mod tests {
             }
         }
         assert_eq!(masked_range(&mask, &depth), Some((5.0, 5.0)));
+    }
+
+    /// A dome of an object filling most of its box, against a far
+    /// background, with a nearer bar at the box's side that is not part of
+    /// it: what a toy in a tray looks like.
+    fn toy_in_a_tray(u: f32, v: f32) -> f32 {
+        let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
+        if d < 0.35 {
+            // 5 at the middle, 3 at the rim: its far half is far from the
+            // box's median.
+            3.0 + 2.0 * (1.0 - (d / 0.35).powi(2))
+        } else if (0.1..0.14).contains(&u) {
+            6.0
+        } else {
+            1.0
+        }
+    }
+
+    #[test]
+    fn a_silhouette_is_the_whole_object_and_nothing_beside_it() {
+        let mut depth = DepthMap::new(96, 96);
+        depth.fill(toy_in_a_tray);
+        let mask = silhouettes(&[(1, Rect::new(0.08, 0.1, 0.9, 0.9))], &depth, 96, 96);
+        let (mut object, mut found, mut stray) = (0, 0, 0);
+        for y in 0..96 {
+            for x in 0..96 {
+                let (u, v) = ((x as f32 + 0.5) / 96.0, (y as f32 + 0.5) / 96.0);
+                let inside = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt() < 0.35;
+                let marked = mask.ids[y * 96 + x] == 1;
+                object += inside as u32;
+                found += (inside && marked) as u32;
+                stray += (!inside && marked) as u32;
+            }
+        }
+        // Bilinear sampling softens the rim by a pixel or so.
+        assert!(found as f32 > 0.97 * object as f32, "{found} of {object}");
+        assert!(
+            (stray as f32) < 0.03 * object as f32,
+            "{stray} stray pixels"
+        );
+    }
+
+    #[test]
+    fn holes_in_an_object_are_filled() {
+        // A ring of near depth around a far centre: a frame, say.
+        let mut depth = DepthMap::new(64, 64);
+        depth.fill(|u, v| {
+            let d = ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt();
+            if (0.1..0.3).contains(&d) { 4.0 } else { 1.0 }
+        });
+        let mask = silhouettes(&[(1, Rect::new(0.1, 0.1, 0.9, 0.9))], &depth, 64, 64);
+        assert_eq!(mask.ids[32 * 64 + 32], 1, "the hole is part of the object");
+        assert_eq!(mask.ids[8 * 64 + 8], 0, "outside the ring is not");
     }
 
     #[test]
